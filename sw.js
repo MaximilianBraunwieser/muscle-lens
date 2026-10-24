@@ -1,5 +1,5 @@
 // Keeps the tracker files on the phone so only the first start downloads them.
-const CACHE = "muscle-lens-v2";
+const CACHE = "muscle-lens-v3";
 const SHELL = ["./", "./index.html", "./manifest.webmanifest", "./icon.svg", "./apple-touch-icon.png", "./vendor/vision_bundle.js"];
 
 self.addEventListener("install", e => {
