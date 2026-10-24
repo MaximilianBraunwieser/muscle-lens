@@ -1,0 +1,638 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Muscle Lens</title>
+<meta name="theme-color" content="#0d0b0c">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Muscle Lens">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="preload" href="vendor/pose_landmarker_lite.task" as="fetch" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;700;800&family=IBM+Plex+Mono:wght@400;500&display=swap" media="print" onload="this.media='all'">
+<style>
+  /* Full-bleed camera view; controls float in a dark glass dock at the bottom */
+  :root {
+    --bg: #0d0b0c;
+    --ink: #f4ece8;
+    --muted: #a8999a;
+    --muscle: #d2463f;
+    --amber: #ffbe55;
+    --panel: rgba(22, 16, 17, .82);
+    --line: rgba(255, 236, 232, .14);
+    --display: 'Archivo', system-ui, -apple-system, sans-serif;
+    --mono: 'IBM Plex Mono', ui-monospace, Menlo, monospace;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    height: 100%; margin: 0; overflow: hidden;
+    background: var(--bg); color: var(--ink);
+    font-family: var(--display); font-size: 15px;
+    -webkit-user-select: none; user-select: none;
+    -webkit-tap-highlight-color: transparent; touch-action: manipulation;
+  }
+  button { font: inherit; color: inherit; }
+  button:focus-visible, input:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
+
+  #stage { position: fixed; inset: 0; }
+  #view { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  /* Kept full-size and on screen under the canvas: phone browsers pause videos they consider hidden. */
+  #video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; pointer-events: none; }
+
+  .top {
+    position: fixed; top: 0; left: 0; right: 0;
+    padding: calc(env(safe-area-inset-top, 0px) + 10px) max(16px, env(safe-area-inset-right, 0px)) 10px max(16px, env(safe-area-inset-left, 0px));
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    background: linear-gradient(rgba(13,11,12,.7), rgba(13,11,12,0));
+    pointer-events: none;
+  }
+  .brand { font-weight: 800; letter-spacing: -.01em; font-size: 17px; }
+  .brand span { color: var(--muscle); }
+  .pill {
+    font-family: var(--mono); font-size: 11px; letter-spacing: .04em; text-transform: uppercase;
+    padding: 6px 10px; border-radius: 999px; background: var(--panel); border: 1px solid var(--line);
+    display: flex; align-items: center; gap: 7px; white-space: nowrap; max-width: 62vw; overflow: hidden; text-overflow: ellipsis;
+  }
+  .pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: none; }
+  .pill.live::before { background: #5fd38a; box-shadow: 0 0 8px #5fd38a; }
+  .pill.warn::before { background: var(--amber); }
+
+  .dock {
+    position: fixed; left: 0; right: 0; bottom: 0;
+    padding: 12px max(16px, env(safe-area-inset-right, 0px)) calc(env(safe-area-inset-bottom, 0px) + 14px) max(16px, env(safe-area-inset-left, 0px));
+    display: grid; gap: 10px;
+    background: linear-gradient(rgba(13,11,12,0), rgba(13,11,12,.85) 35%);
+  }
+  .chips { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; }
+  .chips::-webkit-scrollbar { display: none; }
+  .chip {
+    flex: none; border: 1px solid var(--line); background: var(--panel);
+    padding: 7px 12px; border-radius: 999px; font-size: 13px; font-weight: 500; cursor: pointer;
+  }
+  .chip[aria-pressed="true"] { background: var(--muscle); border-color: var(--muscle); }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .seg { display: flex; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--panel); }
+  .seg button { border: 0; background: none; padding: 9px 11px; font-size: 13px; font-weight: 500; cursor: pointer; }
+  .seg button[aria-pressed="true"] { background: var(--ink); color: var(--bg); }
+  .icon-btn {
+    border: 1px solid var(--line); background: var(--panel); border-radius: 10px;
+    padding: 9px 11px; font-size: 13px; font-weight: 500; cursor: pointer; white-space: nowrap;
+  }
+  .icon-btn[aria-pressed="true"] { border-color: var(--amber); color: var(--amber); }
+  .spacer { flex: 1; }
+  .slider { display: flex; align-items: center; gap: 10px; font-family: var(--mono); font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+  .slider input { flex: 1; accent-color: var(--muscle); }
+
+  .card {
+    position: fixed; left: max(16px, env(safe-area-inset-left, 0px)); right: max(16px, env(safe-area-inset-right, 0px));
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 170px);
+    background: var(--panel); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+    border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px;
+    display: grid; gap: 8px; max-width: 460px; margin-inline: auto;
+  }
+  .card .grp { font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--amber); }
+  .card h2 { margin: 0; font-size: 21px; font-weight: 800; letter-spacing: -.01em; text-wrap: balance; }
+  .card dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 14px; line-height: 1.4; }
+  .card dt { font-family: var(--mono); font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; padding-top: 2px; }
+  .card dd { margin: 0; }
+  .card .x { position: absolute; top: 8px; right: 10px; border: 0; background: none; font-size: 20px; color: var(--muted); cursor: pointer; padding: 4px 8px; }
+
+  .start {
+    position: fixed; inset: 0; z-index: 5; background: var(--bg);
+    display: grid; place-items: center;
+    padding: calc(env(safe-area-inset-top, 0px) + 24px) max(24px, env(safe-area-inset-right, 0px)) calc(env(safe-area-inset-bottom, 0px) + 24px) max(24px, env(safe-area-inset-left, 0px));
+    background-image: radial-gradient(circle at 50% 35%, rgba(210,70,63,.22), transparent 60%);
+  }
+  .start-inner { max-width: 380px; display: grid; gap: 18px; text-align: left; }
+  .start h1 { margin: 0; font-size: 44px; line-height: .95; font-weight: 800; letter-spacing: -.03em; }
+  .start h1 span { color: var(--muscle); display: block; }
+  .start p { margin: 0; color: var(--muted); line-height: 1.5; }
+  .start ol { margin: 0; padding-left: 20px; color: var(--ink); line-height: 1.6; font-size: 14px; }
+  .go {
+    border: 0; background: var(--muscle); color: #fff; font-weight: 700; font-size: 17px;
+    padding: 15px 20px; border-radius: 12px; cursor: pointer;
+  }
+  .go:disabled { opacity: .6; }
+  .err { color: var(--amber); font-size: 14px; line-height: 1.45; }
+  .fine { font-family: var(--mono); font-size: 11px; color: var(--muted); letter-spacing: .03em; }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+<div id="stage">
+  <video id="video" playsinline muted autoplay></video>
+  <canvas id="view"></canvas>
+</div>
+
+<header class="top">
+  <div class="brand">Muscle<span>Lens</span></div>
+  <div class="pill" id="status">Starting</div>
+</header>
+
+<section class="card" id="card" hidden>
+  <button class="x" id="cardClose" aria-label="Close">×</button>
+  <div class="grp" id="cardGroup"></div>
+  <h2 id="cardName"></h2>
+  <dl>
+    <dt>Does</dt><dd id="cardDoes"></dd>
+    <dt>Train</dt><dd id="cardTrain"></dd>
+  </dl>
+</section>
+
+<nav class="dock">
+  <div class="chips" id="chips"></div>
+  <div class="row">
+    <div class="seg" id="facingSeg" role="group" aria-label="Body side">
+      <button data-v="auto" aria-pressed="true">Auto</button>
+      <button data-v="front" aria-pressed="false">Front</button>
+      <button data-v="back" aria-pressed="false">Back</button>
+    </div>
+    <div class="spacer"></div>
+    <button class="icon-btn" id="labelsBtn" aria-pressed="true">Labels</button>
+    <button class="icon-btn" id="flipBtn">Flip</button>
+  </div>
+  <label class="slider">Opacity <input id="opacity" type="range" min="20" max="100" value="80"></label>
+</nav>
+
+<section class="start" id="start">
+  <div class="start-inner">
+    <h1>Muscle<span>Lens</span></h1>
+    <p>Point your camera at a body and see the muscles underneath, tracked live as you move.</p>
+    <ol>
+      <li>Stand 2–3 m from the camera so your whole body is in frame.</li>
+      <li>Turn around to switch to the back muscles.</li>
+      <li>Tap any muscle to learn what it does.</li>
+    </ol>
+    <button class="go" id="goBtn">Start camera</button>
+    <div class="err" id="err" hidden></div>
+    <div class="fine">Everything runs on your phone. No video leaves the device.</div>
+  </div>
+</section>
+
+<script type="module">
+import { PoseLandmarker, FilesetResolver } from "./vendor/vision_bundle.js";
+
+// Served from this folder (and cached by sw.js) so repeat starts don't hit the network.
+const WASM = new URL("vendor/wasm", location.href).href;
+const MODEL = new URL("vendor/pose_landmarker_lite.task", location.href).href;
+
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
+
+const INFO = {
+  trapezius:          { name: "Trapezius", short: "Traps", group: "back", does: "Lifts, squeezes and lowers the shoulder blades; supports the neck.", train: "Shrugs, face pulls, rows" },
+  sternocleidomastoid:{ name: "Sternocleidomastoid", short: "SCM", group: "chest", does: "Turns and tilts the head, bends the neck forward.", train: "Neck flexion, chin tucks" },
+  deltoid:            { name: "Deltoid", short: "Deltoid", group: "chest", does: "Raises the arm forward, out to the side and back.", train: "Overhead press, lateral raises, rear-delt flyes" },
+  pectoralis:         { name: "Pectoralis major", short: "Pecs", group: "chest", does: "Pushes forward and pulls the arm across the body.", train: "Push-ups, bench press, dips" },
+  biceps:             { name: "Biceps brachii", short: "Biceps", group: "arms", does: "Bends the elbow and turns the palm up.", train: "Curls, chin-ups" },
+  brachioradialis:    { name: "Brachioradialis", short: "Brachiorad.", group: "arms", does: "Bends the elbow with the thumb pointing up.", train: "Hammer curls, reverse curls" },
+  forearm_flexors:    { name: "Forearm flexors", short: "Flexors", group: "arms", does: "Bend the wrist and close the fingers. This is your grip.", train: "Farmer's carries, wrist curls, dead hangs" },
+  forearm_extensors:  { name: "Forearm extensors", short: "Extensors", group: "arms", does: "Straighten the wrist and open the fingers.", train: "Reverse wrist curls, band finger extensions" },
+  obliques:           { name: "External obliques", short: "Obliques", group: "core", does: "Rotate and side-bend the trunk.", train: "Side planks, Pallof press, woodchops" },
+  rectus_abdominis:   { name: "Rectus abdominis", short: "Abs", group: "core", does: "Curls the trunk forward and braces the spine.", train: "Hanging leg raises, ab wheel, crunches" },
+  rectus_femoris:     { name: "Rectus femoris", short: "Rectus fem.", group: "legs", does: "Straightens the knee and lifts the thigh.", train: "Squats, lunges, leg extensions" },
+  vastus_lateralis:   { name: "Vastus lateralis", short: "Vastus lat.", group: "legs", does: "Straightens the knee. The biggest of the four quads.", train: "Squats, leg press" },
+  vastus_medialis:    { name: "Vastus medialis", short: "Vastus med.", group: "legs", does: "Straightens the knee and keeps the kneecap on track.", train: "Deep squats, split squats, step-downs" },
+  adductors:          { name: "Adductors", short: "Adductors", group: "legs", does: "Pull the legs together and steady the pelvis.", train: "Copenhagen planks, sumo squats" },
+  tibialis:           { name: "Tibialis anterior", short: "Tibialis", group: "legs", does: "Pulls the toes and foot upward.", train: "Tib raises, heel walks" },
+  gastrocnemius:      { name: "Gastrocnemius", short: "Calf", group: "legs", does: "Points the foot and helps bend the knee.", train: "Standing calf raises, skipping rope" },
+  soleus:             { name: "Soleus", short: "Soleus", group: "legs", does: "Points the foot. Works constantly when you stand and walk.", train: "Seated calf raises" },
+  infraspinatus:      { name: "Infraspinatus", short: "Infraspin.", group: "back", does: "Rotates the arm outward. Part of the rotator cuff.", train: "External rotations, face pulls" },
+  lats:               { name: "Latissimus dorsi", short: "Lats", group: "back", does: "Pulls the arm down and back toward the body.", train: "Pull-ups, lat pulldowns, rows" },
+  erector:            { name: "Erector spinae", short: "Erectors", group: "back", does: "Straightens the spine and holds it upright.", train: "Deadlifts, back extensions, bird dogs" },
+  triceps:            { name: "Triceps brachii", short: "Triceps", group: "arms", does: "Straightens the elbow.", train: "Dips, close-grip push-ups, pushdowns" },
+  glute_med:          { name: "Gluteus medius", short: "Glute med", group: "legs", does: "Lifts the leg sideways and keeps the hips level when you walk.", train: "Side-lying leg raises, banded walks" },
+  glute_max:          { name: "Gluteus maximus", short: "Glutes", group: "legs", does: "Extends the hip. Powers climbing, jumping and standing up.", train: "Hip thrusts, squats, Romanian deadlifts" },
+  biceps_femoris:     { name: "Biceps femoris", short: "Hamstring", group: "legs", does: "Bends the knee and extends the hip (outer hamstring).", train: "Romanian deadlifts, leg curls" },
+  semitendinosus:     { name: "Semitendinosus", short: "Semitend.", group: "legs", does: "Bends the knee and extends the hip (inner hamstring).", train: "Nordic curls, leg curls" },
+};
+const GROUPS = [["all", "All"], ["arms", "Arms"], ["chest", "Chest & shoulders"], ["core", "Core"], ["back", "Back"], ["legs", "Legs"]];
+const GROUP_LABEL = Object.fromEntries(GROUPS);
+
+// ---------- state ----------
+const $ = id => document.getElementById(id);
+const canvas = $("view"), ctx = canvas.getContext("2d"), video = $("video");
+const prefs = loadPrefs();
+let landmarker = null, stream = null, camFacing = "user", mirror = true, running = false;
+let lastVideoTime = -1, smooth = null, misses = 0, facingVal = 1;
+let selectedId = null, drawn = [], W = 0, H = 0, dpr = 1, loadPct = 0;
+
+function loadPrefs() {
+  const d = { labels: true, opacity: 80, group: "all", facing: "auto" };
+  try { return { ...d, ...JSON.parse(localStorage.getItem("muscleLens") || "{}") }; } catch { return d; }
+}
+function savePrefs() { try { localStorage.setItem("muscleLens", JSON.stringify(prefs)); } catch {} }
+
+// ---------- vector helpers ----------
+const add = (a, b) => ({ x: a.x + b.x, y: a.y + b.y });
+const sub = (a, b) => ({ x: a.x - b.x, y: a.y - b.y });
+const mul = (a, k) => ({ x: a.x * k, y: a.y * k });
+const lerp = (a, b, t) => ({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
+const len = a => Math.hypot(a.x, a.y);
+const unit = a => { const l = len(a) || 1; return { x: a.x / l, y: a.y / l }; };
+const perp = a => ({ x: -a.y, y: a.x });
+const dot = (a, b) => a.x * b.x + a.y * b.y;
+
+// A fusiform muscle belly between a and b. Widths are in shoulder-widths (S).
+// `off` shifts the belly sideways; positive means toward `out`.
+function spindle(S, a, b, w0, w1, bulge, off = 0, out = null) {
+  const d = sub(b, a); let n = perp(unit(d));
+  if (out && dot(n, out) < 0) n = mul(n, -1);
+  const N = 14, L = [], R = [], F = [-.66, -.33, 0, .33, .66], fib = F.map(() => []);
+  for (let i = 0; i <= N; i++) {
+    const t = i / N, h = S * ((w0 + (w1 - w0) * t) / 2 + bulge * Math.sin(Math.PI * t));
+    const c = add(add(a, mul(d, t)), mul(n, off * S));
+    L.push(add(c, mul(n, h))); R.push(add(c, mul(n, -h)));
+    F.forEach((f, k) => fib[k].push(add(c, mul(n, h * f))));
+  }
+  return { pts: L.concat(R.reverse()), fib };
+}
+
+function along(poly, t) {
+  const segs = []; let total = 0;
+  for (let i = 1; i < poly.length; i++) { const l = len(sub(poly[i], poly[i - 1])); segs.push(l); total += l; }
+  let d = t * total;
+  for (let i = 0; i < segs.length; i++) {
+    if (d <= segs[i] || i === segs.length - 1) return lerp(poly[i], poly[i + 1], segs[i] ? Math.min(1, d / segs[i]) : 0);
+    d -= segs[i];
+  }
+  return poly[0];
+}
+
+// A flat, fan-shaped muscle: fibres run from an origin line to an insertion segment.
+function sheet(origin, q0, q1) {
+  const fib = [];
+  for (let i = 1; i < 9; i++) { const t = i / 9; fib.push([along(origin, t), lerp(q0, q1, t)]); }
+  return { pts: [...origin, q1, q0], fib };
+}
+
+function blob(c, u, n, hl, hw) {
+  return { pts: [add(add(c, mul(u, -hl)), mul(n, -hw)), add(add(c, mul(u, -hl)), mul(n, hw)), add(add(c, mul(u, hl)), mul(n, hw)), add(add(c, mul(u, hl)), mul(n, -hw))], fib: [] };
+}
+
+// ---------- body model ----------
+const SIDES = [
+  { key: "L", sh: 11, el: 13, wr: 15, hip: 23, kn: 25, an: 27, ear: 7, label: true },
+  { key: "R", sh: 12, el: 14, wr: 16, hip: 24, kn: 26, an: 28, ear: 8, label: false },
+];
+const VIS = .5;
+
+function bodyFrame(p) {
+  const ok = i => p[i] && p[i].v > VIS;
+  if (!ok(11) || !ok(12)) return null;
+  const M = lerp(p[11], p[12], .5), S = len(sub(p[11], p[12]));
+  if (S < 12) return null;
+  let down, Hm;
+  if (ok(23) && ok(24)) { Hm = lerp(p[23], p[24], .5); down = unit(sub(Hm, M)); }
+  else { down = unit(perp(sub(p[11], p[12]))); if (down.y < 0) down = mul(down, -1); Hm = add(M, mul(down, 1.45 * S)); }
+  return { p, ok, M, H: Hm, S, down, up: mul(down, -1) };
+}
+
+function buildFront(g) {
+  const { p, ok, M, H, S, down, up } = g, out = [];
+  const push = (id, shape, label) => out.push({ id, shape, label });
+  const legs = [], torso = [], arms = [];
+
+  // abs (centre, drawn once)
+  {
+    const top = lerp(M, H, .38), bot = lerp(M, H, 1.0), u = unit(sub(bot, top)), n = perp(u), T = len(sub(bot, top));
+    const rows = [.2, .2, .22, .38], gap = .025 * T; let s = 0;
+    rows.forEach((r, i) => {
+      const hl = (r * T - gap) / 2, c = add(top, mul(u, s * T + r * T / 2)); s += r;
+      [-1, 1].forEach((side, j) => torso.push({ id: "rectus_abdominis", shape: blob(add(c, mul(n, side * .088 * S)), u, n, hl, .075 * S), label: i === 1 && j === 0 }));
+    });
+  }
+
+  for (const s of SIDES) {
+    const Sh = p[s.sh], o = unit(sub(Sh, M));
+    const hipPt = ok(s.hip) ? p[s.hip] : add(H, mul(o, .35 * S));
+    const El = ok(s.el) ? p[s.el] : null;
+
+    // obliques go under the abs and pecs
+    torso.unshift({ id: "obliques", shape: spindle(S, add(lerp(Sh, hipPt, .38), mul(o, -.02 * S)), add(hipPt, mul(up, .05 * S)), .22, .16, .03, -.07, o), label: s.label });
+
+    const sTop = add(M, mul(down, .1 * S)), sLow = lerp(M, H, .36), clav = add(lerp(M, Sh, .78), mul(down, .06 * S));
+    const q0 = El ? lerp(Sh, El, .12) : add(Sh, mul(down, .15 * S));
+    const q1 = El ? add(lerp(Sh, El, .24), mul(o, -.06 * S)) : add(add(Sh, mul(down, .3 * S)), mul(o, -.06 * S));
+    torso.push({ id: "pectoralis", shape: sheet([clav, add(lerp(M, Sh, .35), mul(down, .08 * S)), add(sTop, mul(o, .02 * S)), add(sLow, mul(o, .02 * S))], q0, q1), label: s.label });
+
+    torso.push({ id: "trapezius", shape: sheet([add(add(M, mul(up, .42 * S)), mul(o, .07 * S)), add(M, mul(o, .12 * S))], add(lerp(M, Sh, .8), mul(up, .1 * S)), lerp(M, Sh, .88)), label: false });
+    if (ok(s.ear)) torso.push({ id: "sternocleidomastoid", shape: spindle(S, add(p[s.ear], mul(down, .05 * S)), add(add(M, mul(o, .04 * S)), mul(down, .04 * S)), .05, .05, .025), label: false });
+
+    if (El) {
+      arms.push({ id: "deltoid", shape: spindle(S, add(lerp(M, Sh, .8), mul(up, .07 * S)), lerp(Sh, El, .42), .22, .04, .07, .05, o), label: s.label });
+      arms.push({ id: "biceps", shape: spindle(S, lerp(Sh, El, .22), lerp(Sh, El, .94), .07, .06, .08, 0, o), label: s.label });
+      if (ok(s.wr)) {
+        const Wr = p[s.wr];
+        arms.push({ id: "forearm_flexors", shape: spindle(S, El, lerp(El, Wr, .8), .1, .04, .05, -.04, o), label: s.label });
+        arms.push({ id: "brachioradialis", shape: spindle(S, lerp(Sh, El, .82), lerp(El, Wr, .85), .06, .03, .07, .04, o), label: false });
+      }
+    }
+
+    if (ok(s.hip) && ok(s.kn)) {
+      const Hp = p[s.hip], Kn = p[s.kn], lo = unit(sub(Hp, H));
+      const pubis = add(add(H, mul(down, .1 * S)), mul(lo, .02 * S));
+      legs.push({ id: "adductors", shape: sheet([pubis, add(add(H, mul(down, .2 * S)), mul(lo, .04 * S))], add(lerp(Hp, Kn, .3), mul(lo, -.07 * S)), add(lerp(Hp, Kn, .68), mul(lo, -.07 * S))), label: s.label });
+      legs.push({ id: "vastus_lateralis", shape: spindle(S, lerp(Hp, Kn, .1), lerp(Hp, Kn, .92), .1, .06, .07, .08, lo), label: false });
+      legs.push({ id: "vastus_medialis", shape: spindle(S, lerp(Hp, Kn, .55), lerp(Hp, Kn, 1.0), .05, .08, .07, -.07, lo), label: false });
+      legs.push({ id: "rectus_femoris", shape: spindle(S, lerp(Hp, Kn, .04), lerp(Hp, Kn, .9), .06, .05, .08, 0, lo), label: s.label });
+      if (ok(s.an)) {
+        const An = p[s.an];
+        legs.push({ id: "gastrocnemius", shape: spindle(S, lerp(Kn, An, .06), lerp(Kn, An, .6), .06, .03, .06, -.06, lo), label: false });
+        legs.push({ id: "tibialis", shape: spindle(S, lerp(Kn, An, .06), lerp(Kn, An, .92), .07, .03, .04, .03, lo), label: s.label });
+      }
+    }
+  }
+  return [...legs, ...torso, ...arms];
+}
+
+function buildBack(g) {
+  const { p, ok, M, H, S, down, up } = g;
+  const deep = [], mid = [], top = [], legs = [];
+  for (const s of SIDES) {
+    const Sh = p[s.sh], o = unit(sub(Sh, M));
+    const hipPt = ok(s.hip) ? p[s.hip] : add(H, mul(o, .35 * S));
+    const El = ok(s.el) ? p[s.el] : null;
+    const arm = t => El ? lerp(Sh, El, t) : add(Sh, mul(down, t * 1.1 * S));
+    const spine = t => add(lerp(M, H, t), mul(o, .01 * S));
+
+    deep.push({ id: "erector", shape: spindle(S, lerp(M, H, .3), add(H, mul(down, .08 * S)), .06, .08, .03, .06, o), label: s.label });
+    deep.push({ id: "lats", shape: sheet([spine(.42), spine(.95), add(lerp(H, hipPt, .9), mul(up, .12 * S))], add(arm(.15), mul(o, -.05 * S)), add(arm(.25), mul(o, -.06 * S))), label: s.label });
+    mid.push({ id: "infraspinatus", shape: spindle(S, add(lerp(M, Sh, .35), mul(down, .32 * S)), arm(.12), .18, .06, .05, 0, o), label: s.label });
+    mid.push({ id: "trapezius", shape: sheet([add(add(M, mul(up, .42 * S)), mul(o, .02 * S)), add(M, mul(o, .01 * S)), spine(.58)], add(lerp(M, Sh, .42), mul(down, .22 * S)), add(lerp(M, Sh, .88), mul(up, .04 * S))), label: s.label });
+
+    if (El) {
+      top.push({ id: "deltoid", shape: spindle(S, add(lerp(M, Sh, .8), mul(up, .07 * S)), lerp(Sh, El, .42), .22, .04, .07, .05, o), label: s.label });
+      top.push({ id: "triceps", shape: spindle(S, lerp(Sh, El, .15), lerp(Sh, El, .95), .1, .05, .08, 0, o), label: s.label });
+      if (ok(s.wr)) top.push({ id: "forearm_extensors", shape: spindle(S, lerp(Sh, El, .85), lerp(El, p[s.wr], .85), .1, .035, .06, 0, o), label: s.label });
+    }
+
+    if (ok(s.hip) && ok(s.kn)) {
+      const Hp = p[s.hip], Kn = p[s.kn], lo = unit(sub(Hp, H));
+      legs.push({ id: "semitendinosus", shape: spindle(S, lerp(Hp, Kn, .2), lerp(Hp, Kn, 1.02), .07, .04, .07, -.06, lo), label: false });
+      legs.push({ id: "biceps_femoris", shape: spindle(S, lerp(Hp, Kn, .2), lerp(Hp, Kn, 1.02), .07, .04, .07, .06, lo), label: s.label });
+      legs.push({ id: "glute_med", shape: spindle(S, add(add(Hp, mul(up, .32 * S)), mul(lo, -.02 * S)), add(Hp, mul(lo, .08 * S)), .16, .08, .04, 0, lo), label: s.label });
+      legs.push({ id: "glute_max", shape: spindle(S, add(add(H, mul(up, .12 * S)), mul(lo, .05 * S)), lerp(Hp, Kn, .25), .2, .1, .13, .05, lo), label: s.label });
+      if (ok(s.an)) {
+        const An = p[s.an];
+        legs.push({ id: "soleus", shape: spindle(S, lerp(Kn, An, .3), lerp(Kn, An, .9), .1, .04, .06, 0, lo), label: false });
+        legs.push({ id: "gastrocnemius", shape: spindle(S, lerp(Kn, An, .02), lerp(Kn, An, .58), .05, .02, .06, .045, lo), label: s.label });
+        legs.push({ id: "gastrocnemius", shape: spindle(S, lerp(Kn, An, .02), lerp(Kn, An, .65), .05, .02, .065, -.045, lo), label: false });
+      }
+    }
+  }
+  return [...deep, ...mid, ...legs, ...top];
+}
+
+// ---------- rendering ----------
+function smoothPath(pts) {
+  const path = new Path2D(), n = pts.length;
+  const mid = (a, b) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
+  const start = mid(pts[n - 1], pts[0]);
+  path.moveTo(start.x, start.y);
+  for (let i = 0; i < n; i++) { const m = mid(pts[i], pts[(i + 1) % n]); path.quadraticCurveTo(pts[i].x, pts[i].y, m.x, m.y); }
+  path.closePath();
+  return path;
+}
+
+function drawMuscle(m, alpha) {
+  const { pts, fib } = m.shape;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity, cx = 0, cy = 0;
+  for (const q of pts) { cx += q.x; cy += q.y; minX = Math.min(minX, q.x); maxX = Math.max(maxX, q.x); minY = Math.min(minY, q.y); maxY = Math.max(maxY, q.y); }
+  cx /= pts.length; cy /= pts.length;
+  const r = Math.max(4, Math.hypot(maxX - minX, maxY - minY) / 2);
+  const path = smoothPath(pts), sel = m.id === selectedId;
+  m.path = path; m.cx = cx; m.cy = cy;
+
+  ctx.globalAlpha = alpha;
+  const grad = ctx.createRadialGradient(cx - r * .25, cy - r * .3, r * .05, cx, cy, r * 1.05);
+  grad.addColorStop(0, sel ? "#ffd28a" : "#ec6a5c");
+  grad.addColorStop(.55, sel ? "#e8913a" : "#c23a35");
+  grad.addColorStop(1, sel ? "#9a4d16" : "#6e1a1e");
+  ctx.fillStyle = grad; ctx.fill(path);
+
+  ctx.save(); ctx.clip(path);
+  ctx.strokeStyle = sel ? "rgba(255,245,220,.35)" : "rgba(255,210,196,.24)"; ctx.lineWidth = Math.max(1, dpr * .9);
+  for (const f of fib) { ctx.beginPath(); f.forEach((q, i) => i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y)); ctx.stroke(); }
+  ctx.restore();
+
+  ctx.strokeStyle = sel ? "#ffbe55" : "rgba(50,6,10,.75)"; ctx.lineWidth = (sel ? 2.4 : 1.2) * dpr; ctx.stroke(path);
+  ctx.globalAlpha = 1;
+}
+
+function drawLabel(m) {
+  const text = INFO[m.id].short;
+  ctx.font = `500 ${11 * dpr}px "IBM Plex Mono", ui-monospace, monospace`;
+  const w = ctx.measureText(text).width + 12 * dpr, h = 18 * dpr, x = m.cx - w / 2, y = m.cy - h / 2;
+  ctx.fillStyle = m.id === selectedId ? "rgba(255,190,85,.95)" : "rgba(13,11,12,.72)";
+  ctx.beginPath(); ctx.roundRect ? ctx.roundRect(x, y, w, h, 5 * dpr) : ctx.rect(x, y, w, h); ctx.fill();
+  ctx.fillStyle = m.id === selectedId ? "#0d0b0c" : "#f4ece8";
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillText(text, m.cx, m.cy + dpr);
+}
+
+function resize() {
+  dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const w = Math.round(innerWidth * dpr), h = Math.round(innerHeight * dpr);
+  if (w !== W || h !== H) { W = canvas.width = w; H = canvas.height = h; }
+}
+
+function videoRect() {
+  const vw = video.videoWidth, vh = video.videoHeight, sc = Math.max(W / vw, H / vh);
+  const dw = vw * sc, dh = vh * sc;
+  return { ox: (W - dw) / 2, oy: (H - dh) / 2, dw, dh };
+}
+
+function frame() {
+  if (!running) return;
+  resize();
+  if (video.readyState >= 2 && video.videoWidth) {
+    if (landmarker && video.currentTime !== lastVideoTime) {
+      lastVideoTime = video.currentTime;
+      const res = landmarker.detectForVideo(video, performance.now());
+      track(res.landmarks && res.landmarks[0]);
+    }
+    render();
+  }
+  requestAnimationFrame(frame);
+}
+
+function track(raw) {
+  if (!raw) { if (++misses > 8) smooth = null; return; }
+  misses = 0;
+  const A = .55;
+  if (!smooth) smooth = raw.map(l => ({ x: l.x, y: l.y, v: l.visibility ?? 1 }));
+  else raw.forEach((l, i) => { const s = smooth[i]; s.x += (l.x - s.x) * A; s.y += (l.y - s.y) * A; s.v += ((l.visibility ?? 1) - s.v) * A; });
+  // In the raw (unmirrored) image, a person facing the camera has their left shoulder on the right.
+  const d = smooth[11].x - smooth[12].x;
+  if (Math.abs(d) > .03) facingVal += (Math.sign(d) - facingVal) * .15;
+}
+
+function render() {
+  const { ox, oy, dw, dh } = videoRect();
+  ctx.save();
+  if (mirror) { ctx.translate(W, 0); ctx.scale(-1, 1); }
+  ctx.drawImage(video, ox, oy, dw, dh);
+  ctx.restore();
+  ctx.fillStyle = "rgba(13,11,12,.22)"; ctx.fillRect(0, 0, W, H);
+
+  drawn = [];
+  if (!landmarker) return setStatus(loadPct < 1 ? `Loading tracker ${Math.round(loadPct * 100)}%` : "Starting tracker…", "warn");
+  const g = smooth && bodyFrame(smooth.map(l => ({ x: mirror ? W - (ox + l.x * dw) : ox + l.x * dw, y: oy + l.y * dh, v: l.v })));
+  if (!g) return setStatus("Step back until shoulders are in view", "warn");
+
+  const front = prefs.facing === "front" || (prefs.facing === "auto" && facingVal >= 0);
+  drawn = front ? buildFront(g) : buildBack(g);
+  const op = prefs.opacity / 100;
+  for (const m of drawn) {
+    const dim = prefs.group !== "all" && INFO[m.id].group !== prefs.group;
+    drawMuscle(m, dim ? op * .18 : op);
+  }
+  if (prefs.labels) for (const m of drawn) if (m.label && (prefs.group === "all" || INFO[m.id].group === prefs.group)) drawLabel(m);
+  const count = new Set(drawn.map(m => m.id)).size;
+  setStatus(`${front ? "Front" : "Back"} · ${count} muscles`, "live");
+}
+
+let lastStatus = "";
+function setStatus(text, cls) {
+  const key = text + cls; if (key === lastStatus) return; lastStatus = key;
+  const el = $("status"); el.textContent = text; el.className = "pill " + (cls || "");
+}
+
+// ---------- interaction ----------
+canvas.addEventListener("click", e => {
+  if (video.paused && video.srcObject) video.play().catch(() => {});
+  const x = e.clientX * dpr, y = e.clientY * dpr;
+  for (let i = drawn.length - 1; i >= 0; i--) {
+    const m = drawn[i];
+    if (m.path && ctx.isPointInPath(m.path, x, y)) return select(m.id);
+  }
+  select(null);
+});
+
+function select(id) {
+  selectedId = id;
+  $("card").hidden = !id;
+  if (!id) return;
+  const info = INFO[id];
+  $("cardGroup").textContent = GROUP_LABEL[info.group];
+  $("cardName").textContent = info.name;
+  $("cardDoes").textContent = info.does;
+  $("cardTrain").textContent = info.train;
+}
+$("cardClose").onclick = () => select(null);
+
+const chips = $("chips");
+GROUPS.forEach(([v, label]) => {
+  const b = document.createElement("button");
+  b.className = "chip"; b.textContent = label; b.dataset.v = v;
+  b.setAttribute("aria-pressed", String(prefs.group === v));
+  b.onclick = () => { prefs.group = v; savePrefs(); chips.querySelectorAll(".chip").forEach(c => c.setAttribute("aria-pressed", String(c.dataset.v === v))); };
+  chips.appendChild(b);
+});
+
+const seg = $("facingSeg");
+seg.querySelectorAll("button").forEach(b => {
+  b.setAttribute("aria-pressed", String(b.dataset.v === prefs.facing));
+  b.onclick = () => { prefs.facing = b.dataset.v; savePrefs(); seg.querySelectorAll("button").forEach(c => c.setAttribute("aria-pressed", String(c === b))); };
+});
+
+const labelsBtn = $("labelsBtn");
+labelsBtn.setAttribute("aria-pressed", String(prefs.labels));
+labelsBtn.onclick = () => { prefs.labels = !prefs.labels; savePrefs(); labelsBtn.setAttribute("aria-pressed", String(prefs.labels)); };
+
+const opacity = $("opacity");
+opacity.value = prefs.opacity;
+opacity.oninput = () => { prefs.opacity = +opacity.value; savePrefs(); };
+
+$("flipBtn").onclick = async () => {
+  camFacing = camFacing === "user" ? "environment" : "user";
+  try { await startCamera(); } catch (e) { showError(e); }
+};
+
+// ---------- startup ----------
+// Downloads files with a combined progress figure.
+async function download(urls) {
+  const sizes = urls.map(() => 0), got = urls.map(() => 0);
+  const update = () => { const t = sizes.reduce((a, b) => a + b, 0); if (t) loadPct = Math.min(.99, got.reduce((a, b) => a + b, 0) / t); };
+  return Promise.all(urls.map(async (url, i) => {
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`Could not load ${url.split("/").pop()} (${r.status})`);
+    sizes[i] = +r.headers.get("content-length") || 0;
+    if (!r.body || !sizes[i]) { const b = new Uint8Array(await r.arrayBuffer()); sizes[i] = got[i] = b.length; update(); return b; }
+    const reader = r.body.getReader(), chunks = [];
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value); got[i] += value.length; update();
+    }
+    const buf = new Uint8Array(got[i]); let o = 0;
+    for (const c of chunks) { buf.set(c, o); o += c.length; }
+    return buf;
+  }));
+}
+
+const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), ms))]);
+
+async function initModel() {
+  const [model] = await download([MODEL]);
+  loadPct = 1;
+  const vision = await FilesetResolver.forVisionTasks(WASM);
+  const opts = delegate => ({
+    baseOptions: { modelAssetBuffer: model, delegate },
+    runningMode: "VIDEO", numPoses: 1,
+    minPoseDetectionConfidence: .5, minPosePresenceConfidence: .5, minTrackingConfidence: .5,
+  });
+  // Some phones stall while setting up the GPU path; fall back to CPU instead of waiting.
+  try { landmarker = await withTimeout(PoseLandmarker.createFromOptions(vision, opts("GPU")), 6000); }
+  catch { landmarker = await PoseLandmarker.createFromOptions(vision, opts("CPU")); }
+}
+
+async function startCamera() {
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: camFacing, width: { ideal: 1280 }, height: { ideal: 720 } } });
+  } catch (e) {
+    // Some iPhones reject the size hints; retry with the bare minimum.
+    if (e && (e.name === "OverconstrainedError" || e.name === "NotReadableError")) stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: camFacing } });
+    else throw e;
+  }
+  video.srcObject = stream;
+  if (video.readyState < 1) await withTimeout(new Promise(r => video.addEventListener("loadedmetadata", r, { once: true })), 5000).catch(() => {});
+  // play() can stay pending on some phones; don't block startup on it. A tap on the view retries.
+  await withTimeout(video.play(), 3000).catch(() => {});
+  mirror = camFacing === "user";
+  smooth = null; lastVideoTime = -1;
+}
+
+function showError(e) {
+  const err = $("err");
+  $("start").hidden = false; running = false;
+  err.hidden = false;
+  if (!window.isSecureContext || !navigator.mediaDevices) err.textContent = "The camera only works when this page is opened over https:// (or on localhost). Host it on a secure address and open that link on your phone.";
+  else if (e && e.name === "NotAllowedError") err.textContent = "Camera access was blocked. On iPhone: Settings → Apps → Safari → Camera → Allow, then open Muscle Lens again and tap Start camera.";
+  else if (e && e.name === "NotFoundError") err.textContent = "No camera was found on this device.";
+  else err.textContent = "Something went wrong: " + (e && e.message ? e.message : e);
+  $("goBtn").disabled = false; $("goBtn").textContent = "Start camera";
+}
+
+const modelReady = initModel().catch(e => { console.error(e); throw e; });
+
+$("goBtn").onclick = async () => {
+  const btn = $("goBtn"); btn.disabled = true; btn.textContent = "Waiting for camera…"; $("err").hidden = true;
+  try {
+    if (!window.isSecureContext || !navigator.mediaDevices) throw new Error("insecure");
+    await startCamera();
+    $("start").hidden = true;
+    running = true; requestAnimationFrame(frame);
+    try { await navigator.wakeLock?.request("screen"); } catch {}
+    await modelReady.catch(() => { throw new Error("The body tracker could not load. Check your internet connection and reload."); });
+  } catch (e) { showError(e); }
+};
+</script>
+</body>
+</html>
