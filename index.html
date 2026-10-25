@@ -12,7 +12,6 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
-<link rel="preload" href="vendor/pose_landmarker_lite.task" as="fetch" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;700;800&family=IBM+Plex+Mono:wght@400;500&display=swap" media="print" onload="this.media='all'">
 <style>
   /* Full-bleed camera view; controls float in a dark glass dock at the bottom */
@@ -141,6 +140,7 @@
   <div class="grp" id="cardGroup"></div>
   <h2 id="cardName"></h2>
   <dl>
+    <dt>Where</dt><dd id="cardPart"></dd>
     <dt>Does</dt><dd id="cardDoes"></dd>
     <dt>Train</dt><dd id="cardTrain"></dd>
   </dl>
@@ -155,7 +155,7 @@
       <button data-v="back" aria-pressed="false">Back</button>
     </div>
     <div class="spacer"></div>
-    <button class="icon-btn" id="labelsBtn" aria-pressed="true">Labels</button>
+    <button class="icon-btn" id="labelsBtn" aria-pressed="false">Labels</button>
     <button class="icon-btn" id="flipBtn">Flip</button>
   </div>
   <label class="slider">Opacity <input id="opacity" type="range" min="20" max="100" value="80"></label>
@@ -164,11 +164,11 @@
 <section class="start" id="start">
   <div class="start-inner">
     <h1>Muscle<span>Lens</span></h1>
-    <p>Point your camera at a body and see the muscles underneath, tracked live as you move.</p>
+    <p>Aim the circle at any part of a body (a leg, an arm, the chest or the back) and see the muscle underneath.</p>
     <ol>
-      <li>Stand 2–3 m from the camera so your whole body is in frame.</li>
-      <li>Turn around to switch to the back muscles.</li>
-      <li>Tap any muscle to learn what it does.</li>
+      <li>Close-ups work: the whole body doesn't need to be in frame.</li>
+      <li>The muscle under the circle is highlighted and explained.</li>
+      <li>Tap any other muscle to look at it instead.</li>
     </ol>
     <button class="go" id="goBtn">Start camera</button>
     <div class="err" id="err" hidden></div>
@@ -176,58 +176,157 @@
   </div>
 </section>
 
+<script src="vendor/tf.min.js" defer></script>
+<script src="vendor/body-pix.min.js" defer></script>
 <script type="module">
-import { PoseLandmarker, FilesetResolver } from "./vendor/vision_bundle.js";
+const bodyPix = window["body-pix"];
 
 // Served from this folder (and cached by sw.js) so repeat starts don't hit the network.
-const WASM = new URL("vendor/wasm", location.href).href;
-const MODEL = new URL("vendor/pose_landmarker_lite.task", location.href).href;
+const MODEL_DIR = new URL("vendor/bodypix/", location.href).href;
+const MODEL_FILES = ["model-stride16.json", "group1-shard1of2.bin", "group1-shard2of2.bin"];
+const SEG_W = 320;   // width of the frame the body model sees
+const LS = 2;        // muscle layer resolution, relative to the model frame
 
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
 
 const INFO = {
-  trapezius:          { name: "Trapezius", short: "Traps", group: "back", does: "Lifts, squeezes and lowers the shoulder blades; supports the neck.", train: "Shrugs, face pulls, rows" },
-  sternocleidomastoid:{ name: "Sternocleidomastoid", short: "SCM", group: "chest", does: "Turns and tilts the head, bends the neck forward.", train: "Neck flexion, chin tucks" },
-  deltoid:            { name: "Deltoid", short: "Deltoid", group: "chest", does: "Raises the arm forward, out to the side and back.", train: "Overhead press, lateral raises, rear-delt flyes" },
-  pectoralis:         { name: "Pectoralis major", short: "Pecs", group: "chest", does: "Pushes forward and pulls the arm across the body.", train: "Push-ups, bench press, dips" },
-  biceps:             { name: "Biceps brachii", short: "Biceps", group: "arms", does: "Bends the elbow and turns the palm up.", train: "Curls, chin-ups" },
-  brachioradialis:    { name: "Brachioradialis", short: "Brachiorad.", group: "arms", does: "Bends the elbow with the thumb pointing up.", train: "Hammer curls, reverse curls" },
-  forearm_flexors:    { name: "Forearm flexors", short: "Flexors", group: "arms", does: "Bend the wrist and close the fingers. This is your grip.", train: "Farmer's carries, wrist curls, dead hangs" },
-  forearm_extensors:  { name: "Forearm extensors", short: "Extensors", group: "arms", does: "Straighten the wrist and open the fingers.", train: "Reverse wrist curls, band finger extensions" },
-  obliques:           { name: "External obliques", short: "Obliques", group: "core", does: "Rotate and side-bend the trunk.", train: "Side planks, Pallof press, woodchops" },
-  rectus_abdominis:   { name: "Rectus abdominis", short: "Abs", group: "core", does: "Curls the trunk forward and braces the spine.", train: "Hanging leg raises, ab wheel, crunches" },
-  rectus_femoris:     { name: "Rectus femoris", short: "Rectus fem.", group: "legs", does: "Straightens the knee and lifts the thigh.", train: "Squats, lunges, leg extensions" },
-  vastus_lateralis:   { name: "Vastus lateralis", short: "Vastus lat.", group: "legs", does: "Straightens the knee. The biggest of the four quads.", train: "Squats, leg press" },
-  vastus_medialis:    { name: "Vastus medialis", short: "Vastus med.", group: "legs", does: "Straightens the knee and keeps the kneecap on track.", train: "Deep squats, split squats, step-downs" },
-  adductors:          { name: "Adductors", short: "Adductors", group: "legs", does: "Pull the legs together and steady the pelvis.", train: "Copenhagen planks, sumo squats" },
-  tibialis:           { name: "Tibialis anterior", short: "Tibialis", group: "legs", does: "Pulls the toes and foot upward.", train: "Tib raises, heel walks" },
-  gastrocnemius:      { name: "Gastrocnemius", short: "Calf", group: "legs", does: "Points the foot and helps bend the knee.", train: "Standing calf raises, skipping rope" },
-  soleus:             { name: "Soleus", short: "Soleus", group: "legs", does: "Points the foot. Works constantly when you stand and walk.", train: "Seated calf raises" },
-  infraspinatus:      { name: "Infraspinatus", short: "Infraspin.", group: "back", does: "Rotates the arm outward. Part of the rotator cuff.", train: "External rotations, face pulls" },
-  lats:               { name: "Latissimus dorsi", short: "Lats", group: "back", does: "Pulls the arm down and back toward the body.", train: "Pull-ups, lat pulldowns, rows" },
-  erector:            { name: "Erector spinae", short: "Erectors", group: "back", does: "Straightens the spine and holds it upright.", train: "Deadlifts, back extensions, bird dogs" },
-  triceps:            { name: "Triceps brachii", short: "Triceps", group: "arms", does: "Straightens the elbow.", train: "Dips, close-grip push-ups, pushdowns" },
-  glute_med:          { name: "Gluteus medius", short: "Glute med", group: "legs", does: "Lifts the leg sideways and keeps the hips level when you walk.", train: "Side-lying leg raises, banded walks" },
-  glute_max:          { name: "Gluteus maximus", short: "Glutes", group: "legs", does: "Extends the hip. Powers climbing, jumping and standing up.", train: "Hip thrusts, squats, Romanian deadlifts" },
-  biceps_femoris:     { name: "Biceps femoris", short: "Hamstring", group: "legs", does: "Bends the knee and extends the hip (outer hamstring).", train: "Romanian deadlifts, leg curls" },
-  semitendinosus:     { name: "Semitendinosus", short: "Semitend.", group: "legs", does: "Bends the knee and extends the hip (inner hamstring).", train: "Nordic curls, leg curls" },
+  trapezius:         { name: "Trapezius", short: "Traps", group: "back", does: "Lifts, squeezes and lowers the shoulder blades; supports the neck.", train: "Shrugs, face pulls, rows" },
+  deltoid:           { name: "Deltoid", short: "Deltoid", group: "chest", does: "Raises the arm forward, out to the side and back.", train: "Overhead press, lateral raises, rear-delt flyes" },
+  pectoralis:        { name: "Pectoralis major", short: "Pecs", group: "chest", does: "Pushes forward and pulls the arm across the body.", train: "Push-ups, bench press, dips" },
+  biceps:            { name: "Biceps brachii", short: "Biceps", group: "arms", does: "Bends the elbow and turns the palm up.", train: "Curls, chin-ups" },
+  brachioradialis:   { name: "Brachioradialis", short: "Brachiorad.", group: "arms", does: "Bends the elbow with the thumb pointing up.", train: "Hammer curls, reverse curls" },
+  forearm_flexors:   { name: "Forearm flexors", short: "Flexors", group: "arms", does: "Bend the wrist and close the fingers. This is your grip.", train: "Farmer's carries, wrist curls, dead hangs" },
+  forearm_extensors: { name: "Forearm extensors", short: "Extensors", group: "arms", does: "Straighten the wrist and open the fingers.", train: "Reverse wrist curls, band finger extensions" },
+  triceps:           { name: "Triceps brachii", short: "Triceps", group: "arms", does: "Straightens the elbow.", train: "Dips, close-grip push-ups, pushdowns" },
+  obliques:          { name: "External obliques", short: "Obliques", group: "core", does: "Rotate and side-bend the trunk.", train: "Side planks, Pallof press, woodchops" },
+  rectus_abdominis:  { name: "Rectus abdominis", short: "Abs", group: "core", does: "Curls the trunk forward and braces the spine.", train: "Hanging leg raises, ab wheel, crunches" },
+  infraspinatus:     { name: "Infraspinatus", short: "Infraspin.", group: "back", does: "Rotates the arm outward. Part of the rotator cuff.", train: "External rotations, face pulls" },
+  lats:              { name: "Latissimus dorsi", short: "Lats", group: "back", does: "Pulls the arm down and back toward the body.", train: "Pull-ups, lat pulldowns, rows" },
+  erector:           { name: "Erector spinae", short: "Erectors", group: "back", does: "Straightens the spine and holds it upright.", train: "Deadlifts, back extensions, bird dogs" },
+  rectus_femoris:    { name: "Rectus femoris", short: "Rectus fem.", group: "legs", does: "Straightens the knee and lifts the thigh.", train: "Squats, lunges, leg extensions" },
+  vastus_lateralis:  { name: "Vastus lateralis", short: "Vastus lat.", group: "legs", does: "Straightens the knee. The biggest of the four quads.", train: "Squats, leg press" },
+  vastus_medialis:   { name: "Vastus medialis", short: "Vastus med.", group: "legs", does: "Straightens the knee and keeps the kneecap on track.", train: "Deep squats, split squats, step-downs" },
+  sartorius:         { name: "Sartorius", short: "Sartorius", group: "legs", does: "Lifts, turns out and bends the leg; it lets you sit cross-legged.", train: "Lunges, step-ups, cross-legged leg lifts" },
+  adductors:         { name: "Adductors", short: "Adductors", group: "legs", does: "Pull the legs together and steady the pelvis.", train: "Copenhagen planks, sumo squats" },
+  glute_max:         { name: "Gluteus maximus", short: "Glutes", group: "legs", does: "Extends the hip. Powers climbing, jumping and standing up.", train: "Hip thrusts, squats, Romanian deadlifts" },
+  biceps_femoris:    { name: "Biceps femoris", short: "Hamstring", group: "legs", does: "Bends the knee and extends the hip (outer hamstring).", train: "Romanian deadlifts, leg curls" },
+  semitendinosus:    { name: "Semitendinosus", short: "Semitend.", group: "legs", does: "Bends the knee and extends the hip (inner hamstring).", train: "Nordic curls, leg curls" },
+  tibialis:          { name: "Tibialis anterior", short: "Tibialis", group: "legs", does: "Pulls the toes and foot upward.", train: "Tib raises, heel walks" },
+  peroneus:          { name: "Peroneus longus", short: "Peroneus", group: "legs", does: "Turns the sole outward and steadies the ankle.", train: "Band ankle eversions, single-leg balance" },
+  gastrocnemius:     { name: "Gastrocnemius", short: "Calf", group: "legs", does: "Points the foot and helps bend the knee.", train: "Standing calf raises, skipping rope" },
+  soleus:            { name: "Soleus", short: "Soleus", group: "legs", does: "Points the foot. Works constantly when you stand and walk.", train: "Seated calf raises" },
 };
 const GROUPS = [["all", "All"], ["arms", "Arms"], ["chest", "Chest & shoulders"], ["core", "Core"], ["back", "Back"], ["legs", "Legs"]];
 const GROUP_LABEL = Object.fromEntries(GROUPS);
 
+// ---------- body parts ----------
+// BodyPix labels every pixel with one of 24 parts; these are folded into segments.
+const TORSO = 1, ULEG = 2, LLEG = 3, UARM = 4, LARM = 5, HEAD = 6, HAND = 7, FOOT = 8;
+const CLASS_OF = [HEAD, HEAD, UARM, UARM, UARM, UARM, LARM, LARM, LARM, LARM, HAND, HAND, TORSO, TORSO, ULEG, ULEG, ULEG, ULEG, LLEG, LLEG, LLEG, LLEG, FOOT, FOOT];
+const IS_FRONT = CLASS_OF.map((c, i) => c >= TORSO && c <= LARM && i % 2 === 0);
+const IS_LEFT = CLASS_OF.map((_, i) => [2, 3, 6, 7, 14, 15, 18, 19].includes(i));
+const IS_RIGHT = CLASS_OF.map((_, i) => [4, 5, 8, 9, 16, 17, 20, 21].includes(i));
+const PART_NAME = { [TORSO]: "Torso", [ULEG]: "Thigh", [LLEG]: "Lower leg", [UARM]: "Upper arm", [LARM]: "Forearm" };
+// Typical length / width of each segment, used to rebuild a segment that runs off screen.
+const RATIO = { [TORSO]: 1.45, [ULEG]: 2.4, [LLEG]: 3.2, [UARM]: 3.0, [LARM]: 3.2 };
+// Which neighbouring parts sit at the near (hip/shoulder) end and the far end of each segment.
+const PROX = { [TORSO]: [HEAD, UARM], [ULEG]: [TORSO], [LLEG]: [ULEG], [UARM]: [TORSO, HEAD], [LARM]: [UARM] };
+const DIST = { [TORSO]: [ULEG], [ULEG]: [LLEG, FOOT], [LLEG]: [FOOT], [UARM]: [LARM, HAND], [LARM]: [HAND] };
+const DRAW_ORDER = [TORSO, ULEG, LLEG, UARM, LARM];
+
+// Muscles of each segment in its own coordinates: t runs 0 → 1 from the near joint to the far
+// joint (in segment lengths), s runs across (in segment widths; positive is the outer side).
+// belly(id, s0, t0, s1, t1, width at start, width at end, extra bulge, label?)
+const SIDES = [1, -1];
+const SHAPES = {
+  [TORSO]: {
+    back(B) {
+      for (const k of SIDES) {
+        const lab = k === 1;
+        B.sheet("lats", [[k * .02, .4], [k * .02, .97], [k * .46, 1]], [k * .52, .14], [k * .52, .26], lab);
+        B.belly("erector", k * .08, .4, k * .08, 1.03, .08, .11, .03, lab);
+        B.belly("infraspinatus", k * .2, .3, k * .46, .12, .22, .08, .05, lab);
+        B.sheet("trapezius", [[k * .02, -.08], [k * .01, .1], [k * .01, .58]], [k * .46, 0], [k * .22, .27], lab);
+      }
+    },
+    front(B) {
+      for (const k of SIDES) B.belly("obliques", k * .37, .36, k * .37, .97, .26, .22, .02, k === 1);
+      const rows = [.2, .2, .22, .38], span = .62; let t = .36;
+      rows.forEach((r, i) => {
+        const ht = (r * span - .015) / 2, ct = t + r * span / 2; t += r * span;
+        for (const k of SIDES) B.blob("rectus_abdominis", k * .088, ct, .075, ht, i === 1 && k === 1);
+      });
+      for (const k of SIDES) B.sheet("pectoralis", [[k * .44, .03], [k * .22, .05], [k * .05, .07], [k * .04, .31]], [k * .52, .11], [k * .5, .22], k === 1);
+    },
+  },
+  [ULEG]: {
+    back(B) {
+      B.belly("semitendinosus", -.2, .22, -.24, 1, .38, .2, .08);
+      B.belly("biceps_femoris", .2, .22, .28, 1, .38, .2, .08, true);
+      B.belly("glute_max", .05, -.15, .18, .32, .95, .5, .12, true);
+    },
+    front(B) {
+      B.belly("adductors", -.3, -.02, -.4, .62, .45, .1, .05, true);
+      B.belly("vastus_lateralis", .26, .1, .22, .95, .32, .2, .1, true);
+      B.belly("vastus_medialis", -.18, .55, -.1, 1, .22, .25, .13, true);
+      B.belly("rectus_femoris", 0, .04, 0, .92, .24, .18, .12, true);
+      B.belly("sartorius", .34, 0, -.3, .95, .1, .08, .01);
+    },
+  },
+  [LLEG]: {
+    back(B) {
+      B.belly("soleus", 0, .3, 0, .93, .7, .25, .1, true);
+      B.belly("gastrocnemius", .2, 0, .12, .6, .42, .1, .12, true);
+      B.belly("gastrocnemius", -.2, 0, -.12, .68, .42, .1, .14);
+    },
+    front(B) {
+      B.belly("gastrocnemius", -.36, .04, -.32, .6, .28, .1, .1);
+      B.belly("peroneus", .36, .06, .32, .85, .22, .1, .04, true);
+      B.belly("tibialis", .06, .04, 0, .88, .36, .12, .08, true);
+    },
+  },
+  [UARM]: {
+    back(B) {
+      B.belly("triceps", 0, .12, 0, 1, .55, .3, .14, true);
+      B.belly("deltoid", 0, -.1, .06, .42, .95, .15, .1, true);
+    },
+    front(B) {
+      B.belly("biceps", 0, .22, 0, .96, .4, .3, .14, true);
+      B.belly("deltoid", 0, -.1, .06, .42, .95, .15, .1, true);
+    },
+  },
+  [LARM]: {
+    back(B) {
+      B.belly("forearm_extensors", 0, 0, 0, .85, .75, .3, .1, true);
+      B.belly("brachioradialis", .32, -.1, .22, .8, .35, .15, .1);
+    },
+    front(B) {
+      B.belly("forearm_flexors", -.15, 0, -.1, .85, .6, .25, .1, true);
+      B.belly("brachioradialis", .3, -.1, .2, .8, .38, .15, .1, true);
+    },
+  },
+};
+
 // ---------- state ----------
 const $ = id => document.getElementById(id);
 const canvas = $("view"), ctx = canvas.getContext("2d"), video = $("video");
+const segCan = document.createElement("canvas"), segCtx = segCan.getContext("2d", { willReadFrequently: true });
+const layer = document.createElement("canvas"), lctx = layer.getContext("2d");
+const tmp = document.createElement("canvas"), tctx = tmp.getContext("2d");
+const maskPool = [];
 const prefs = loadPrefs();
-let landmarker = null, stream = null, camFacing = "user", mirror = true, running = false;
-let lastVideoTime = -1, smooth = null, misses = 0, facingVal = 1;
-let selectedId = null, drawn = [], W = 0, H = 0, dpr = 1, loadPct = 0;
+let net = null, stream = null, camFacing = "user", mirror = true, running = false, loadPct = 0;
+let W = 0, H = 0, dpr = 1, segH = 0;
+let frames = [], muscles = [], found = [], compMap = null, prevFrames = [];
+let target = null, candKey = null, candCount = 0, tapPoint = null, tapUntil = 0, dismissedId = null, cardKey = "";
+// The model was trained on whole people, so a close-up is fed to it shrunk; a distant body less so.
+let segRes = .375, misses = 0;
 
 function loadPrefs() {
-  const d = { labels: true, opacity: 80, group: "all", facing: "auto" };
-  try { return { ...d, ...JSON.parse(localStorage.getItem("muscleLens") || "{}") }; } catch { return d; }
+  const d = { labels: false, opacity: 80, group: "all", facing: "auto" };
+  try { return { ...d, ...JSON.parse(localStorage.getItem("muscleLens2") || "{}") }; } catch { return d; }
 }
-function savePrefs() { try { localStorage.setItem("muscleLens", JSON.stringify(prefs)); } catch {} }
+function savePrefs() { try { localStorage.setItem("muscleLens2", JSON.stringify(prefs)); } catch {} }
 
 // ---------- vector helpers ----------
 const add = (a, b) => ({ x: a.x + b.x, y: a.y + b.y });
@@ -238,20 +337,16 @@ const len = a => Math.hypot(a.x, a.y);
 const unit = a => { const l = len(a) || 1; return { x: a.x / l, y: a.y / l }; };
 const perp = a => ({ x: -a.y, y: a.x });
 const dot = (a, b) => a.x * b.x + a.y * b.y;
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const nextFrame = () => new Promise(r => requestAnimationFrame(r));
+const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), ms))]);
 
-// A fusiform muscle belly between a and b. Widths are in shoulder-widths (S).
-// `off` shifts the belly sideways; positive means toward `out`.
-function spindle(S, a, b, w0, w1, bulge, off = 0, out = null) {
-  const d = sub(b, a); let n = perp(unit(d));
-  if (out && dot(n, out) < 0) n = mul(n, -1);
-  const N = 14, L = [], R = [], F = [-.66, -.33, 0, .33, .66], fib = F.map(() => []);
-  for (let i = 0; i <= N; i++) {
-    const t = i / N, h = S * ((w0 + (w1 - w0) * t) / 2 + bulge * Math.sin(Math.PI * t));
-    const c = add(add(a, mul(d, t)), mul(n, off * S));
-    L.push(add(c, mul(n, h))); R.push(add(c, mul(n, -h)));
-    F.forEach((f, k) => fib[k].push(add(c, mul(n, h * f))));
-  }
-  return { pts: L.concat(R.reverse()), fib };
+function pct(a, q) {
+  const n = a.length; if (!n) return 0;
+  const step = Math.max(1, Math.floor(n / 800)), s = [];
+  for (let i = 0; i < n; i += step) s.push(a[i]);
+  s.sort((x, y) => x - y);
+  return s[Math.min(s.length - 1, Math.floor(q * s.length))];
 }
 
 function along(poly, t) {
@@ -265,132 +360,12 @@ function along(poly, t) {
   return poly[0];
 }
 
-// A flat, fan-shaped muscle: fibres run from an origin line to an insertion segment.
-function sheet(origin, q0, q1) {
-  const fib = [];
-  for (let i = 1; i < 9; i++) { const t = i / 9; fib.push([along(origin, t), lerp(q0, q1, t)]); }
-  return { pts: [...origin, q1, q0], fib };
+function centroid(pts) {
+  let x = 0, y = 0;
+  for (const q of pts) { x += q.x; y += q.y; }
+  return { x: x / pts.length, y: y / pts.length };
 }
 
-function blob(c, u, n, hl, hw) {
-  return { pts: [add(add(c, mul(u, -hl)), mul(n, -hw)), add(add(c, mul(u, -hl)), mul(n, hw)), add(add(c, mul(u, hl)), mul(n, hw)), add(add(c, mul(u, hl)), mul(n, -hw))], fib: [] };
-}
-
-// ---------- body model ----------
-const SIDES = [
-  { key: "L", sh: 11, el: 13, wr: 15, hip: 23, kn: 25, an: 27, ear: 7, label: true },
-  { key: "R", sh: 12, el: 14, wr: 16, hip: 24, kn: 26, an: 28, ear: 8, label: false },
-];
-const VIS = .5;
-
-function bodyFrame(p) {
-  const ok = i => p[i] && p[i].v > VIS;
-  if (!ok(11) || !ok(12)) return null;
-  const M = lerp(p[11], p[12], .5), S = len(sub(p[11], p[12]));
-  if (S < 12) return null;
-  let down, Hm;
-  if (ok(23) && ok(24)) { Hm = lerp(p[23], p[24], .5); down = unit(sub(Hm, M)); }
-  else { down = unit(perp(sub(p[11], p[12]))); if (down.y < 0) down = mul(down, -1); Hm = add(M, mul(down, 1.45 * S)); }
-  return { p, ok, M, H: Hm, S, down, up: mul(down, -1) };
-}
-
-function buildFront(g) {
-  const { p, ok, M, H, S, down, up } = g, out = [];
-  const push = (id, shape, label) => out.push({ id, shape, label });
-  const legs = [], torso = [], arms = [];
-
-  // abs (centre, drawn once)
-  {
-    const top = lerp(M, H, .38), bot = lerp(M, H, 1.0), u = unit(sub(bot, top)), n = perp(u), T = len(sub(bot, top));
-    const rows = [.2, .2, .22, .38], gap = .025 * T; let s = 0;
-    rows.forEach((r, i) => {
-      const hl = (r * T - gap) / 2, c = add(top, mul(u, s * T + r * T / 2)); s += r;
-      [-1, 1].forEach((side, j) => torso.push({ id: "rectus_abdominis", shape: blob(add(c, mul(n, side * .088 * S)), u, n, hl, .075 * S), label: i === 1 && j === 0 }));
-    });
-  }
-
-  for (const s of SIDES) {
-    const Sh = p[s.sh], o = unit(sub(Sh, M));
-    const hipPt = ok(s.hip) ? p[s.hip] : add(H, mul(o, .35 * S));
-    const El = ok(s.el) ? p[s.el] : null;
-
-    // obliques go under the abs and pecs
-    torso.unshift({ id: "obliques", shape: spindle(S, add(lerp(Sh, hipPt, .38), mul(o, -.02 * S)), add(hipPt, mul(up, .05 * S)), .22, .16, .03, -.07, o), label: s.label });
-
-    const sTop = add(M, mul(down, .1 * S)), sLow = lerp(M, H, .36), clav = add(lerp(M, Sh, .78), mul(down, .06 * S));
-    const q0 = El ? lerp(Sh, El, .12) : add(Sh, mul(down, .15 * S));
-    const q1 = El ? add(lerp(Sh, El, .24), mul(o, -.06 * S)) : add(add(Sh, mul(down, .3 * S)), mul(o, -.06 * S));
-    torso.push({ id: "pectoralis", shape: sheet([clav, add(lerp(M, Sh, .35), mul(down, .08 * S)), add(sTop, mul(o, .02 * S)), add(sLow, mul(o, .02 * S))], q0, q1), label: s.label });
-
-    torso.push({ id: "trapezius", shape: sheet([add(add(M, mul(up, .42 * S)), mul(o, .07 * S)), add(M, mul(o, .12 * S))], add(lerp(M, Sh, .8), mul(up, .1 * S)), lerp(M, Sh, .88)), label: false });
-    if (ok(s.ear)) torso.push({ id: "sternocleidomastoid", shape: spindle(S, add(p[s.ear], mul(down, .05 * S)), add(add(M, mul(o, .04 * S)), mul(down, .04 * S)), .05, .05, .025), label: false });
-
-    if (El) {
-      arms.push({ id: "deltoid", shape: spindle(S, add(lerp(M, Sh, .8), mul(up, .07 * S)), lerp(Sh, El, .42), .22, .04, .07, .05, o), label: s.label });
-      arms.push({ id: "biceps", shape: spindle(S, lerp(Sh, El, .22), lerp(Sh, El, .94), .07, .06, .08, 0, o), label: s.label });
-      if (ok(s.wr)) {
-        const Wr = p[s.wr];
-        arms.push({ id: "forearm_flexors", shape: spindle(S, El, lerp(El, Wr, .8), .1, .04, .05, -.04, o), label: s.label });
-        arms.push({ id: "brachioradialis", shape: spindle(S, lerp(Sh, El, .82), lerp(El, Wr, .85), .06, .03, .07, .04, o), label: false });
-      }
-    }
-
-    if (ok(s.hip) && ok(s.kn)) {
-      const Hp = p[s.hip], Kn = p[s.kn], lo = unit(sub(Hp, H));
-      const pubis = add(add(H, mul(down, .1 * S)), mul(lo, .02 * S));
-      legs.push({ id: "adductors", shape: sheet([pubis, add(add(H, mul(down, .2 * S)), mul(lo, .04 * S))], add(lerp(Hp, Kn, .3), mul(lo, -.07 * S)), add(lerp(Hp, Kn, .68), mul(lo, -.07 * S))), label: s.label });
-      legs.push({ id: "vastus_lateralis", shape: spindle(S, lerp(Hp, Kn, .1), lerp(Hp, Kn, .92), .1, .06, .07, .08, lo), label: false });
-      legs.push({ id: "vastus_medialis", shape: spindle(S, lerp(Hp, Kn, .55), lerp(Hp, Kn, 1.0), .05, .08, .07, -.07, lo), label: false });
-      legs.push({ id: "rectus_femoris", shape: spindle(S, lerp(Hp, Kn, .04), lerp(Hp, Kn, .9), .06, .05, .08, 0, lo), label: s.label });
-      if (ok(s.an)) {
-        const An = p[s.an];
-        legs.push({ id: "gastrocnemius", shape: spindle(S, lerp(Kn, An, .06), lerp(Kn, An, .6), .06, .03, .06, -.06, lo), label: false });
-        legs.push({ id: "tibialis", shape: spindle(S, lerp(Kn, An, .06), lerp(Kn, An, .92), .07, .03, .04, .03, lo), label: s.label });
-      }
-    }
-  }
-  return [...legs, ...torso, ...arms];
-}
-
-function buildBack(g) {
-  const { p, ok, M, H, S, down, up } = g;
-  const deep = [], mid = [], top = [], legs = [];
-  for (const s of SIDES) {
-    const Sh = p[s.sh], o = unit(sub(Sh, M));
-    const hipPt = ok(s.hip) ? p[s.hip] : add(H, mul(o, .35 * S));
-    const El = ok(s.el) ? p[s.el] : null;
-    const arm = t => El ? lerp(Sh, El, t) : add(Sh, mul(down, t * 1.1 * S));
-    const spine = t => add(lerp(M, H, t), mul(o, .01 * S));
-
-    deep.push({ id: "erector", shape: spindle(S, lerp(M, H, .3), add(H, mul(down, .08 * S)), .06, .08, .03, .06, o), label: s.label });
-    deep.push({ id: "lats", shape: sheet([spine(.42), spine(.95), add(lerp(H, hipPt, .9), mul(up, .12 * S))], add(arm(.15), mul(o, -.05 * S)), add(arm(.25), mul(o, -.06 * S))), label: s.label });
-    mid.push({ id: "infraspinatus", shape: spindle(S, add(lerp(M, Sh, .35), mul(down, .32 * S)), arm(.12), .18, .06, .05, 0, o), label: s.label });
-    mid.push({ id: "trapezius", shape: sheet([add(add(M, mul(up, .42 * S)), mul(o, .02 * S)), add(M, mul(o, .01 * S)), spine(.58)], add(lerp(M, Sh, .42), mul(down, .22 * S)), add(lerp(M, Sh, .88), mul(up, .04 * S))), label: s.label });
-
-    if (El) {
-      top.push({ id: "deltoid", shape: spindle(S, add(lerp(M, Sh, .8), mul(up, .07 * S)), lerp(Sh, El, .42), .22, .04, .07, .05, o), label: s.label });
-      top.push({ id: "triceps", shape: spindle(S, lerp(Sh, El, .15), lerp(Sh, El, .95), .1, .05, .08, 0, o), label: s.label });
-      if (ok(s.wr)) top.push({ id: "forearm_extensors", shape: spindle(S, lerp(Sh, El, .85), lerp(El, p[s.wr], .85), .1, .035, .06, 0, o), label: s.label });
-    }
-
-    if (ok(s.hip) && ok(s.kn)) {
-      const Hp = p[s.hip], Kn = p[s.kn], lo = unit(sub(Hp, H));
-      legs.push({ id: "semitendinosus", shape: spindle(S, lerp(Hp, Kn, .2), lerp(Hp, Kn, 1.02), .07, .04, .07, -.06, lo), label: false });
-      legs.push({ id: "biceps_femoris", shape: spindle(S, lerp(Hp, Kn, .2), lerp(Hp, Kn, 1.02), .07, .04, .07, .06, lo), label: s.label });
-      legs.push({ id: "glute_med", shape: spindle(S, add(add(Hp, mul(up, .32 * S)), mul(lo, -.02 * S)), add(Hp, mul(lo, .08 * S)), .16, .08, .04, 0, lo), label: s.label });
-      legs.push({ id: "glute_max", shape: spindle(S, add(add(H, mul(up, .12 * S)), mul(lo, .05 * S)), lerp(Hp, Kn, .25), .2, .1, .13, .05, lo), label: s.label });
-      if (ok(s.an)) {
-        const An = p[s.an];
-        legs.push({ id: "soleus", shape: spindle(S, lerp(Kn, An, .3), lerp(Kn, An, .9), .1, .04, .06, 0, lo), label: false });
-        legs.push({ id: "gastrocnemius", shape: spindle(S, lerp(Kn, An, .02), lerp(Kn, An, .58), .05, .02, .06, .045, lo), label: s.label });
-        legs.push({ id: "gastrocnemius", shape: spindle(S, lerp(Kn, An, .02), lerp(Kn, An, .65), .05, .02, .065, -.045, lo), label: false });
-      }
-    }
-  }
-  return [...deep, ...mid, ...legs, ...top];
-}
-
-// ---------- rendering ----------
 function smoothPath(pts) {
   const path = new Path2D(), n = pts.length;
   const mid = (a, b) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
@@ -401,102 +376,386 @@ function smoothPath(pts) {
   return path;
 }
 
-function drawMuscle(m, alpha) {
-  const { pts, fib } = m.shape;
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity, cx = 0, cy = 0;
-  for (const q of pts) { cx += q.x; cy += q.y; minX = Math.min(minX, q.x); maxX = Math.max(maxX, q.x); minY = Math.min(minY, q.y); maxY = Math.max(maxY, q.y); }
-  cx /= pts.length; cy /= pts.length;
-  const r = Math.max(4, Math.hypot(maxX - minX, maxY - minY) / 2);
-  const path = smoothPath(pts), sel = m.id === selectedId;
-  m.path = path; m.cx = cx; m.cy = cy;
+// ---------- reading the body model's output ----------
+// A few pixels of every part class, for "which end of this segment touches the thigh?" checks.
+function sampleClasses(cls, w) {
+  const counts = new Uint32Array(9), seen = new Uint32Array(9), out = {}, step = {};
+  for (const c of cls) counts[c]++;
+  for (let c = 1; c <= 8; c++) { out[c] = []; step[c] = Math.max(1, Math.ceil(counts[c] / 1200)); }
+  for (let i = 0; i < cls.length; i++) {
+    const c = cls[i];
+    if (c && seen[c]++ % step[c] === 0) out[c].push(i % w, (i / w) | 0);
+  }
+  return out;
+}
 
-  ctx.globalAlpha = alpha;
-  const grad = ctx.createRadialGradient(cx - r * .25, cy - r * .3, r * .05, cx, cy, r * 1.05);
+function near(E, classes, samples) {
+  let best = Infinity;
+  for (const c of classes) {
+    const a = samples[c];
+    for (let i = 0; i < a.length; i += 2) { const dx = a[i] - E.x, dy = a[i + 1] - E.y, d = dx * dx + dy * dy; if (d < best) best = d; }
+  }
+  return best === Infinity ? null : Math.sqrt(best);
+}
+
+function analyze(seg) {
+  const data = seg.data, w = seg.width, h = seg.height, n = w * h;
+  const cls = new Uint8Array(n);
+  let body = 0;
+  for (let i = 0; i < n; i++) { const p = data[i]; if (p >= 0) { cls[i] = CLASS_OF[p]; body++; } }
+  const coverage = body / n;
+  if (coverage > .3) { segRes = .375; misses = 0; }
+  else if (coverage > .02) { if (coverage < .12) segRes = .75; misses = 0; }
+  else if (++misses > 1) segRes = segRes === .375 ? .75 : .375;   // nothing found: try the other scale
+  const samples = sampleClasses(cls, w);
+
+  // Each connected patch of one segment class is one limb (or the torso).
+  const comp = new Int16Array(n).fill(-1), queue = new Int32Array(n), comps = [], minSize = n * 0.003;
+  for (let i = 0; i < n; i++) {
+    const c = cls[i];
+    if (c < TORSO || c > LARM || comp[i] !== -1) continue;
+    const id = comps.length; let head = 0, tail = 0;
+    queue[tail++] = i; comp[i] = id;
+    while (head < tail) {
+      const j = queue[head++], x = j % w;
+      if (x > 0 && cls[j - 1] === c && comp[j - 1] === -1) { comp[j - 1] = id; queue[tail++] = j - 1; }
+      if (x < w - 1 && cls[j + 1] === c && comp[j + 1] === -1) { comp[j + 1] = id; queue[tail++] = j + 1; }
+      if (j >= w && cls[j - w] === c && comp[j - w] === -1) { comp[j - w] = id; queue[tail++] = j - w; }
+      if (j < n - w && cls[j + w] === c && comp[j + w] === -1) { comp[j + w] = id; queue[tail++] = j + w; }
+    }
+    const idx = queue.slice(0, tail);
+    let mx = 0, my = 0;
+    for (const j of idx) { mx += j % w; my += (j / w) | 0; }
+    comps.push({ cls: c, idx, ok: tail >= minSize, m: { x: mx / tail, y: my / tail } });
+  }
+
+  const ok = comps.filter(c => c.ok);
+  const torso = ok.filter(c => c.cls === TORSO).sort((a, b) => b.idx.length - a.idx.length)[0];
+  const next = [];
+  ok.forEach((c, i) => {
+    const others = ok.filter(o => o !== c && o.cls === c.cls);
+    c.frame = frameOf(c, data, w, h, samples, torso ? torso.m : null, others);
+    c.frame.mask = maskFor(i, c, w, h);
+    next.push(c.frame);
+  });
+  smoothFrames(next);
+  next.sort((a, b) => DRAW_ORDER.indexOf(a.cls) - DRAW_ORDER.indexOf(b.cls));
+  frames = next; found = comps; compMap = comp;
+  muscles = buildMuscles(frames);
+}
+
+// Measures one segment from its own pixels: centre line, near/far end, width and length.
+function frameOf(c, data, w, h, samples, torsoM, others) {
+  const idx = c.idx, cnt = idx.length, m = c.m;
+  let sxx = 0, syy = 0, sxy = 0, fr = 0, lf = 0, rt = 0;
+  for (let k = 0; k < cnt; k++) {
+    const j = idx[k], dx = j % w - m.x, dy = ((j / w) | 0) - m.y, p = data[j];
+    sxx += dx * dx; syy += dy * dy; sxy += dx * dy;
+    if (IS_FRONT[p]) fr++;
+    if (IS_LEFT[p]) lf++; else if (IS_RIGHT[p]) rt++;
+  }
+  const ang = 0.5 * Math.atan2(2 * sxy, sxx - syy);
+  let u = { x: Math.cos(ang), y: Math.sin(ang) };
+  if (c.cls === TORSO) {
+    // A torso is usually upright; only trust its own shape when it is clearly long and near vertical.
+    const tr = sxx + syy, det = sxx * syy - sxy * sxy, r = Math.sqrt(Math.max(0, tr * tr / 4 - det));
+    if (!((tr / 2 + r) > 2.2 * (tr / 2 - r) && Math.abs(u.y) > 0.7)) u = { x: 0, y: 1 };
+  }
+  let nv = perp(u);
+
+  const ts = new Float32Array(cnt), ss = new Float32Array(cnt);
+  for (let k = 0; k < cnt; k++) {
+    const j = idx[k], dx = j % w - m.x, dy = ((j / w) | 0) - m.y;
+    ts[k] = dx * u.x + dy * u.y; ss[k] = dx * nv.x + dy * nv.y;
+  }
+  let tLo = pct(ts, .02), tHi = pct(ts, .98);
+  const b0 = tLo + (tHi - tLo) * .3, b1 = tLo + (tHi - tLo) * .7, band = [];
+  for (let k = 0; k < cnt; k++) if (ts[k] >= b0 && ts[k] <= b1) band.push(ss[k]);
+  let sLo = pct(band, .05), sHi = pct(band, .95);
+
+  // Does the segment run off the edge of the picture at either end or side?
+  let loTr = false, hiTr = false, sLoTr = false, sHiTr = false;
+  const e = (tHi - tLo) * .1, sMid0 = (sLo + sHi) / 2;
+  for (let k = 0; k < cnt; k++) {
+    const j = idx[k], x = j % w, y = (j / w) | 0;
+    if (x > 1 && x < w - 2 && y > 1 && y < h - 2) continue;
+    if (ts[k] < tLo + e) loTr = true;
+    if (ts[k] > tHi - e) hiTr = true;
+    if (ts[k] >= b0 && ts[k] <= b1) { if (ss[k] < sMid0) sLoTr = true; else sHiTr = true; }
+  }
+
+  // Decide which end is the near joint (hip, knee, shoulder, elbow) from the neighbouring parts.
+  const score = E => {
+    const p = near(E, PROX[c.cls], samples), d = near(E, DIST[c.cls], samples);
+    return p === null && d === null ? null : (p ?? 0) - (d ?? 0);
+  };
+  const E0 = add(m, mul(u, tLo)), E1 = add(m, mul(u, tHi)), s0 = score(E0), s1 = score(E1);
+  let flip;
+  if (s0 !== null && Math.abs(s0 - s1) > w * .04) flip = s1 < s0;
+  else if ((c.cls === ULEG || c.cls === UARM) && loTr !== hiTr) flip = hiTr;   // an upper limb leaves the frame at the hip/shoulder end
+  else flip = E1.y < E0.y;                                                     // otherwise assume an upright body
+  if (flip) { u = mul(u, -1); [tLo, tHi] = [-tHi, -tLo]; [loTr, hiTr] = [hiTr, loTr]; }
+
+  // Point the across-axis outward, away from the body's middle.
+  if (c.cls !== TORSO) {
+    let out = torsoM ? sub(m, torsoM) : null;
+    if ((!out || len(out) < w * .02) && others.length) out = sub(m, others[0].m);
+    if (!out || len(out) < w * .02) {
+      // Last resort: the model's left/right label. A left limb seen from the front is on the picture's right.
+      const front = fr * 2 >= cnt, left = lf >= rt;
+      out = { x: left === front ? 1 : -1, y: 0 };
+    }
+    if (dot(nv, out) < 0) { nv = mul(nv, -1); [sLo, sHi] = [-sHi, -sLo]; [sLoTr, sHiTr] = [sHiTr, sLoTr]; }
+  }
+
+  let Wd = Math.max(2, sHi - sLo), sMid = (sLo + sHi) / 2;
+  const Lvis = Math.max(2, tHi - tLo);
+  if (c.cls === TORSO && sLoTr !== sHiTr && !loTr && !hiTr) {
+    // One side of the torso is cut off: rebuild its width from its height.
+    const Wf = Math.max(Wd, Lvis / RATIO[TORSO]);
+    sMid = sLoTr ? sHi - Wf / 2 : sLo + Wf / 2; Wd = Wf;
+  }
+  // Rebuild the part of the segment that is off screen from its typical proportions.
+  const Lf = Math.max(Lvis, RATIO[c.cls] * Wd);
+  let start = tLo, L = Lvis;
+  if (loTr && !hiTr) { start = tHi - Lf; L = Lf; }
+  else if (hiTr && !loTr) { L = Lf; }
+  else if (loTr && hiTr) { start = (tLo + tHi) / 2 - Lf / 2; L = Lf; }
+
+  return { cls: c.cls, m, u, n: nv, P0: add(add(m, mul(u, start)), mul(nv, sMid)), L, Wd, front: fr / cnt };
+}
+
+// Blend each segment with the same segment from the previous frame to calm the jitter.
+function smoothFrames(next) {
+  const used = new Set();
+  for (const f of next) {
+    let best = null, bd = SEG_W * .3;
+    for (const p of prevFrames) {
+      if (p.cls !== f.cls || used.has(p)) continue;
+      const d = len(sub(p.m, f.m)); if (d < bd) { bd = d; best = p; }
+    }
+    if (!best) continue;
+    used.add(best);
+    f.front = best.front + (f.front - best.front) * .35;
+    if (dot(best.u, f.u) <= 0) continue;   // the ends swapped; take the new reading as is
+    const a = .45;
+    f.P0 = lerp(best.P0, f.P0, a); f.u = unit(lerp(best.u, f.u, a));
+    if (dot(best.n, f.n) > 0) f.n = unit(lerp(best.n, f.n, a));
+    f.L += (best.L - f.L) * (1 - a); f.Wd += (best.Wd - f.Wd) * (1 - a);
+  }
+  prevFrames = next;
+}
+
+function maskFor(i, c, w, h) {
+  let mc = maskPool[i];
+  if (!mc) mc = maskPool[i] = document.createElement("canvas");
+  if (mc.width !== w || mc.height !== h) { mc.width = w; mc.height = h; }
+  const mctx = mc.getContext("2d"), img = mctx.createImageData(w, h), d = img.data;
+  for (const j of c.idx) d[j * 4 + 3] = 255;
+  mctx.putImageData(img, 0, 0);
+  return mc;
+}
+
+// ---------- muscles ----------
+function buildMuscles(list) {
+  const out = [];
+  for (const f of list) {
+    f.isFront = prefs.facing === "front" || (prefs.facing === "auto" && f.front >= .5);
+    SHAPES[f.cls][f.isFront ? "front" : "back"](makeBuilder(f, out));
+  }
+  return out;
+}
+
+function makeBuilder(f, out) {
+  const P = (s, t) => ({ x: f.P0.x + f.u.x * t * f.L + f.n.x * s * f.Wd, y: f.P0.y + f.u.y * t * f.L + f.n.y * s * f.Wd });
+  const push = (id, pts, fib, label) => out.push({ id, f, pts, fib, label: !!label, path: smoothPath(pts), c: centroid(pts) });
+  return {
+    belly(id, s0, t0, s1, t1, w0, w1, bulge, label) {
+      const a = P(s0, t0), b = P(s1, t1), d = sub(b, a), nn = perp(unit(d));
+      const N = 12, left = [], right = [], F = [-.6, 0, .6], fib = F.map(() => []);
+      for (let i = 0; i <= N; i++) {
+        const t = i / N, hw = f.Wd * ((w0 + (w1 - w0) * t) / 2 + bulge * Math.sin(Math.PI * t)), c = add(a, mul(d, t));
+        left.push(add(c, mul(nn, hw))); right.push(add(c, mul(nn, -hw)));
+        F.forEach((k, j) => fib[j].push(add(c, mul(nn, hw * k))));
+      }
+      push(id, left.concat(right.reverse()), fib, label);
+    },
+    // A flat fan-shaped muscle: fibres run from an origin line to an insertion segment.
+    sheet(id, origin, q0, q1, label) {
+      const o = origin.map(([s, t]) => P(s, t)), a = P(...q0), b = P(...q1), fib = [];
+      for (let i = 1; i < 8; i++) { const t = i / 8; fib.push([along(o, t), lerp(a, b, t)]); }
+      push(id, [...o, b, a], fib, label);
+    },
+    blob(id, s, t, hs, ht, label) {
+      const c = P(s, t), ux = mul(f.u, ht * f.L), nx = mul(f.n, hs * f.Wd);
+      push(id, [sub(sub(c, ux), nx), add(sub(c, ux), nx), add(add(c, ux), nx), sub(add(c, ux), nx)], [], label);
+    },
+  };
+}
+
+// The muscle at a point of the model frame: whichever drawn muscle covers it, else the closest
+// one on the same body part.
+function muscleAt(sx, sy) {
+  if (!compMap) return null;
+  const w = SEG_W, h = compMap.length / w;
+  let ci = -1;
+  for (let r = 0; r <= 6 && ci < 0; r += 2) {
+    for (let dy = -r; dy <= r && ci < 0; dy += 2) for (let dx = -r; dx <= r && ci < 0; dx += 2) {
+      const x = Math.round(sx + dx), y = Math.round(sy + dy);
+      if (x < 0 || y < 0 || x >= w || y >= h) continue;
+      const c = compMap[y * w + x];
+      if (c >= 0 && found[c] && found[c].ok) ci = c;
+    }
+  }
+  if (ci < 0) return null;
+  const f = found[ci].frame, cand = muscles.filter(m => m.f === f && (prefs.group === "all" || INFO[m.id].group === prefs.group));
+  if (!cand.length) return null;
+  segCtx.setTransform(1, 0, 0, 1, 0, 0);
+  for (let i = cand.length - 1; i >= 0; i--) if (segCtx.isPointInPath(cand[i].path, sx, sy)) return cand[i];
+  // Between muscles: take the one whose outline comes closest.
+  let best = null, bd = Infinity;
+  for (const m of cand) for (const q of m.pts) { const d = (q.x - sx) ** 2 + (q.y - sy) ** 2; if (d < bd) { bd = d; best = m; } }
+  return best;
+}
+
+function updateTarget() {
+  if (tapPoint && performance.now() < tapUntil) { target = muscleAt(tapPoint.x, tapPoint.y); if (target) return; }
+  tapPoint = null;
+  const m = muscleAt(SEG_W / 2, segH / 2);
+  const key = m ? m.id + ":" + m.f.cls : null, cur = target ? target.id + ":" + target.f.cls : null;
+  if (key === cur) { target = m; candCount = 0; return; }
+  // Switch only after the new muscle has been under the circle for two frames in a row.
+  if (key === candKey) candCount++; else { candKey = key; candCount = 1; }
+  if (candCount >= 2) { target = m; candCount = 0; }
+  else if (target) target = muscles.find(x => x.id === target.id && x.f.cls === target.f.cls) || null;
+}
+
+// Draws every muscle into an offscreen layer, each body part clipped to its own outline.
+function compose() {
+  lctx.setTransform(1, 0, 0, 1, 0, 0);
+  lctx.clearRect(0, 0, layer.width, layer.height);
+  const px = dpr * SEG_W / (W || 1);   // one screen pixel in model-frame units
+  for (const f of frames) {
+    tctx.setTransform(1, 0, 0, 1, 0, 0);
+    tctx.globalCompositeOperation = "source-over";
+    tctx.clearRect(0, 0, tmp.width, tmp.height);
+    tctx.setTransform(LS, 0, 0, LS, 0, 0);
+    drawBase(tctx, f, px);
+    for (const m of muscles) if (m.f === f) drawMuscle(tctx, m, px);
+    tctx.globalCompositeOperation = "destination-in";
+    tctx.imageSmoothingEnabled = true;
+    tctx.drawImage(f.mask, 0, 0);
+    tctx.globalCompositeOperation = "source-over";
+    lctx.drawImage(tmp, 0, 0);
+  }
+}
+
+// Deep muscle tissue under the named muscles, so the whole body part reads as muscle.
+function drawBase(c, f, px) {
+  const inGroup = prefs.group === "all" || muscles.some(m => m.f === f && INFO[m.id].group === prefs.group);
+  c.globalAlpha = inGroup ? .9 : .18;
+  c.fillStyle = "#5c1619";
+  c.fillRect(0, 0, SEG_W, segH);
+  c.strokeStyle = "rgba(255,210,196,.12)"; c.lineWidth = .9 * px;
+  const d = SEG_W + segH;
+  c.beginPath();
+  for (let k = -d; k <= d; k += 5) {
+    const o = add(f.m, mul(f.n, k));
+    c.moveTo(o.x - f.u.x * d, o.y - f.u.y * d); c.lineTo(o.x + f.u.x * d, o.y + f.u.y * d);
+  }
+  c.stroke();
+  c.globalAlpha = 1;
+}
+
+function drawMuscle(c, m, px) {
+  const { pts, fib, path } = m, sel = m === target;
+  const dim = prefs.group !== "all" && INFO[m.id].group !== prefs.group;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const q of pts) { minX = Math.min(minX, q.x); maxX = Math.max(maxX, q.x); minY = Math.min(minY, q.y); maxY = Math.max(maxY, q.y); }
+  const r = Math.max(2, Math.hypot(maxX - minX, maxY - minY) / 2), cx = m.c.x, cy = m.c.y;
+  c.globalAlpha = dim ? .18 : 1;
+  const grad = c.createRadialGradient(cx - r * .25, cy - r * .3, r * .05, cx, cy, r * 1.05);
   grad.addColorStop(0, sel ? "#ffd28a" : "#ec6a5c");
   grad.addColorStop(.55, sel ? "#e8913a" : "#c23a35");
   grad.addColorStop(1, sel ? "#9a4d16" : "#6e1a1e");
-  ctx.fillStyle = grad; ctx.fill(path);
-
-  ctx.save(); ctx.clip(path);
-  ctx.strokeStyle = sel ? "rgba(255,245,220,.35)" : "rgba(255,210,196,.24)"; ctx.lineWidth = Math.max(1, dpr * .9);
-  for (const f of fib) { ctx.beginPath(); f.forEach((q, i) => i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y)); ctx.stroke(); }
-  ctx.restore();
-
-  ctx.strokeStyle = sel ? "#ffbe55" : "rgba(50,6,10,.75)"; ctx.lineWidth = (sel ? 2.4 : 1.2) * dpr; ctx.stroke(path);
-  ctx.globalAlpha = 1;
+  c.fillStyle = grad; c.fill(path);
+  c.save(); c.clip(path);
+  c.strokeStyle = sel ? "rgba(255,245,220,.35)" : "rgba(255,210,196,.24)"; c.lineWidth = .9 * px;
+  for (const l of fib) { c.beginPath(); l.forEach((q, i) => i ? c.lineTo(q.x, q.y) : c.moveTo(q.x, q.y)); c.stroke(); }
+  c.restore();
+  c.strokeStyle = sel ? "#ffbe55" : "rgba(50,6,10,.75)"; c.lineWidth = (sel ? 2.4 : 1.2) * px; c.stroke(path);
+  c.globalAlpha = 1;
 }
 
-function drawLabel(m) {
-  const text = INFO[m.id].short;
-  ctx.font = `500 ${11 * dpr}px "IBM Plex Mono", ui-monospace, monospace`;
-  const w = ctx.measureText(text).width + 12 * dpr, h = 18 * dpr, x = m.cx - w / 2, y = m.cy - h / 2;
-  ctx.fillStyle = m.id === selectedId ? "rgba(255,190,85,.95)" : "rgba(13,11,12,.72)";
-  ctx.beginPath(); ctx.roundRect ? ctx.roundRect(x, y, w, h, 5 * dpr) : ctx.rect(x, y, w, h); ctx.fill();
-  ctx.fillStyle = m.id === selectedId ? "#0d0b0c" : "#f4ece8";
-  ctx.textAlign = "center"; ctx.textBaseline = "middle";
-  ctx.fillText(text, m.cx, m.cy + dpr);
-}
-
+// ---------- screen ----------
 function resize() {
   dpr = Math.min(window.devicePixelRatio || 1, 2);
   const w = Math.round(innerWidth * dpr), h = Math.round(innerHeight * dpr);
   if (w !== W || h !== H) { W = canvas.width = w; H = canvas.height = h; }
 }
 
-function videoRect() {
-  const vw = video.videoWidth, vh = video.videoHeight, sc = Math.max(W / vw, H / vh);
-  const dw = vw * sc, dh = vh * sc;
-  return { ox: (W - dw) / 2, oy: (H - dh) / 2, dw, dh };
+function cover(dw, dh) {
+  const vw = video.videoWidth, vh = video.videoHeight, sc = Math.max(dw / vw, dh / vh);
+  return { x: (dw - vw * sc) / 2, y: (dh - vh * sc) / 2, w: vw * sc, h: vh * sc };
 }
 
-function frame() {
+const toScreen = p => { const k = W / SEG_W; return { x: (mirror ? SEG_W - p.x : p.x) * k, y: p.y * k }; };
+
+function render() {
   if (!running) return;
   resize();
   if (video.readyState >= 2 && video.videoWidth) {
-    if (landmarker && video.currentTime !== lastVideoTime) {
-      lastVideoTime = video.currentTime;
-      const res = landmarker.detectForVideo(video, performance.now());
-      track(res.landmarks && res.landmarks[0]);
+    const r = cover(W, H);
+    ctx.save();
+    if (mirror) { ctx.translate(W, 0); ctx.scale(-1, 1); }
+    ctx.drawImage(video, r.x, r.y, r.w, r.h);
+    ctx.restore();
+    ctx.fillStyle = "rgba(13,11,12,.22)"; ctx.fillRect(0, 0, W, H);
+    if (frames.length) {
+      ctx.save();
+      if (mirror) { ctx.translate(W, 0); ctx.scale(-1, 1); }
+      ctx.globalAlpha = prefs.opacity / 100;
+      ctx.drawImage(layer, 0, 0, W, H);
+      ctx.restore();
     }
-    render();
+    if (prefs.labels) drawLabels();
+    drawReticle();
   }
-  requestAnimationFrame(frame);
+  if (!net) setStatus(loadPct < 1 ? `Loading body model ${Math.round(loadPct * 100)}%` : "Starting body model…", "warn");
+  requestAnimationFrame(render);
 }
 
-function track(raw) {
-  if (!raw) { if (++misses > 8) smooth = null; return; }
-  misses = 0;
-  const A = .55;
-  if (!smooth) smooth = raw.map(l => ({ x: l.x, y: l.y, v: l.visibility ?? 1 }));
-  else raw.forEach((l, i) => { const s = smooth[i]; s.x += (l.x - s.x) * A; s.y += (l.y - s.y) * A; s.v += ((l.visibility ?? 1) - s.v) * A; });
-  // In the raw (unmirrored) image, a person facing the camera has their left shoulder on the right.
-  const d = smooth[11].x - smooth[12].x;
-  if (Math.abs(d) > .03) facingVal += (Math.sign(d) - facingVal) * .15;
+function drawLabels() {
+  ctx.font = `500 ${11 * dpr}px "IBM Plex Mono", ui-monospace, monospace`;
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  const boxes = [];
+  for (const m of muscles) {
+    if (!m.label || (prefs.group !== "all" && INFO[m.id].group !== prefs.group)) continue;
+    const p = toScreen(m.c), text = INFO[m.id].short, w = ctx.measureText(text).width + 12 * dpr, h = 18 * dpr;
+    const b = { x: p.x - w / 2, y: p.y - h / 2, w, h };
+    if (boxes.some(o => b.x < o.x + o.w && o.x < b.x + b.w && b.y < o.y + o.h && o.y < b.y + b.h)) continue;
+    boxes.push(b);
+    ctx.fillStyle = m === target ? "rgba(255,190,85,.95)" : "rgba(13,11,12,.72)";
+    ctx.beginPath(); ctx.roundRect ? ctx.roundRect(b.x, b.y, w, h, 5 * dpr) : ctx.rect(b.x, b.y, w, h); ctx.fill();
+    ctx.fillStyle = m === target ? "#0d0b0c" : "#f4ece8";
+    ctx.fillText(text, p.x, p.y + dpr);
+  }
 }
 
-function render() {
-  const { ox, oy, dw, dh } = videoRect();
-  ctx.save();
-  if (mirror) { ctx.translate(W, 0); ctx.scale(-1, 1); }
-  ctx.drawImage(video, ox, oy, dw, dh);
-  ctx.restore();
-  ctx.fillStyle = "rgba(13,11,12,.22)"; ctx.fillRect(0, 0, W, H);
-
-  drawn = [];
-  if (!landmarker) return setStatus(loadPct < 1 ? `Loading tracker ${Math.round(loadPct * 100)}%` : "Starting tracker…", "warn");
-  const g = smooth && bodyFrame(smooth.map(l => ({ x: mirror ? W - (ox + l.x * dw) : ox + l.x * dw, y: oy + l.y * dh, v: l.v })));
-  if (!g) return setStatus("Step back until shoulders are in view", "warn");
-
-  const front = prefs.facing === "front" || (prefs.facing === "auto" && facingVal >= 0);
-  drawn = front ? buildFront(g) : buildBack(g);
-  const op = prefs.opacity / 100;
-  for (const m of drawn) {
-    const dim = prefs.group !== "all" && INFO[m.id].group !== prefs.group;
-    drawMuscle(m, dim ? op * .18 : op);
-  }
-  if (prefs.labels) for (const m of drawn) if (m.label && (prefs.group === "all" || INFO[m.id].group === prefs.group)) drawLabel(m);
-  const count = new Set(drawn.map(m => m.id)).size;
-  setStatus(`${front ? "Front" : "Back"} · ${count} muscles`, "live");
+function drawReticle() {
+  const aim = !tapPoint, x = W / 2, y = H / 2, r = 24 * dpr;
+  if (!aim) return;
+  ctx.strokeStyle = target ? "#ffbe55" : "rgba(244,236,232,.8)";
+  ctx.lineWidth = 2 * dpr;
+  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(x - r - 8 * dpr, y); ctx.lineTo(x - r + 6 * dpr, y);
+  ctx.moveTo(x + r - 6 * dpr, y); ctx.lineTo(x + r + 8 * dpr, y);
+  ctx.moveTo(x, y - r - 8 * dpr); ctx.lineTo(x, y - r + 6 * dpr);
+  ctx.moveTo(x, y + r - 6 * dpr); ctx.lineTo(x, y + r + 8 * dpr);
+  ctx.stroke();
+  ctx.fillStyle = ctx.strokeStyle;
+  ctx.beginPath(); ctx.arc(x, y, 2.5 * dpr, 0, Math.PI * 2); ctx.fill();
 }
 
 let lastStatus = "";
@@ -505,28 +764,66 @@ function setStatus(text, cls) {
   const el = $("status"); el.textContent = text; el.className = "pill " + (cls || "");
 }
 
-// ---------- interaction ----------
-canvas.addEventListener("click", e => {
-  if (video.paused && video.srcObject) video.play().catch(() => {});
-  const x = e.clientX * dpr, y = e.clientY * dpr;
-  for (let i = drawn.length - 1; i >= 0; i--) {
-    const m = drawn[i];
-    if (m.path && ctx.isPointInPath(m.path, x, y)) return select(m.id);
-  }
-  select(null);
-});
-
-function select(id) {
-  selectedId = id;
-  $("card").hidden = !id;
-  if (!id) return;
-  const info = INFO[id];
+function updateCard() {
+  if (!target) { $("card").hidden = true; dismissedId = null; cardKey = ""; return; }
+  if (target.id !== dismissedId) dismissedId = null;
+  $("card").hidden = !!dismissedId;
+  const where = `${PART_NAME[target.f.cls]} · ${target.f.isFront ? "front" : "back"}`, key = target.id + where;
+  if (key === cardKey) return;
+  cardKey = key;
+  const info = INFO[target.id];
   $("cardGroup").textContent = GROUP_LABEL[info.group];
   $("cardName").textContent = info.name;
+  $("cardPart").textContent = where;
   $("cardDoes").textContent = info.does;
   $("cardTrain").textContent = info.train;
 }
-$("cardClose").onclick = () => select(null);
+
+function updateStatus() {
+  if (!frames.length) return setStatus("Aim at a body part", "warn");
+  if (target) return setStatus(`${PART_NAME[target.f.cls]} · ${target.f.isFront ? "front" : "back"}`, "live");
+  setStatus(`${frames.length} body part${frames.length > 1 ? "s" : ""} found`, "live");
+}
+
+// ---------- body model loop ----------
+async function segLoop() {
+  while (running) {
+    if (!net || video.readyState < 2 || !video.videoWidth || !W) { await sleep(100); continue; }
+    segH = Math.max(1, Math.round(SEG_W * H / W));
+    if (segCan.width !== SEG_W || segCan.height !== segH) {
+      segCan.width = SEG_W; segCan.height = segH;
+      layer.width = tmp.width = SEG_W * LS; layer.height = tmp.height = segH * LS;
+      prevFrames = [];
+    }
+    // The model sees the same crop the screen shows, unmirrored, so its left/right labels stay true.
+    const r = cover(SEG_W, segH);
+    segCtx.setTransform(1, 0, 0, 1, 0, 0);
+    segCtx.drawImage(video, r.x, r.y, r.w, r.h);
+    let seg;
+    try { seg = await net.segmentPersonParts(segCan, { internalResolution: segRes, segmentationThreshold: 0.6 }); }
+    catch (e) { console.error(e); await sleep(300); continue; }
+    analyze(seg);
+    updateTarget();
+    compose();
+    updateCard();
+    updateStatus();
+    await nextFrame();
+  }
+}
+
+// ---------- interaction ----------
+canvas.addEventListener("click", e => {
+  if (video.paused && video.srcObject) video.play().catch(() => {});
+  const k = W / SEG_W;
+  let sx = e.clientX * dpr / k; const sy = e.clientY * dpr / k;
+  if (mirror) sx = SEG_W - sx;
+  const m = muscleAt(sx, sy);
+  if (m) { tapPoint = { x: sx, y: sy }; tapUntil = performance.now() + 5000; target = m; dismissedId = null; }
+  else tapPoint = null;
+  compose(); updateCard(); updateStatus();
+});
+
+$("cardClose").onclick = () => { if (target) dismissedId = target.id; $("card").hidden = true; };
 
 const chips = $("chips");
 GROUPS.forEach(([v, label]) => {
@@ -557,41 +854,25 @@ $("flipBtn").onclick = async () => {
 };
 
 // ---------- startup ----------
-// Downloads files with a combined progress figure.
 async function download(urls) {
   const sizes = urls.map(() => 0), got = urls.map(() => 0);
   const update = () => { const t = sizes.reduce((a, b) => a + b, 0); if (t) loadPct = Math.min(.99, got.reduce((a, b) => a + b, 0) / t); };
-  return Promise.all(urls.map(async (url, i) => {
+  await Promise.all(urls.map(async (url, i) => {
     const r = await fetch(url);
     if (!r.ok) throw new Error(`Could not load ${url.split("/").pop()} (${r.status})`);
     sizes[i] = +r.headers.get("content-length") || 0;
-    if (!r.body || !sizes[i]) { const b = new Uint8Array(await r.arrayBuffer()); sizes[i] = got[i] = b.length; update(); return b; }
-    const reader = r.body.getReader(), chunks = [];
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      chunks.push(value); got[i] += value.length; update();
-    }
-    const buf = new Uint8Array(got[i]); let o = 0;
-    for (const c of chunks) { buf.set(c, o); o += c.length; }
-    return buf;
+    if (!r.body || !sizes[i]) { const b = await r.arrayBuffer(); sizes[i] = got[i] = b.byteLength; update(); return; }
+    const reader = r.body.getReader();
+    for (;;) { const { done, value } = await reader.read(); if (done) break; got[i] += value.length; update(); }
   }));
 }
 
-const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), ms))]);
-
 async function initModel() {
-  const [model] = await download([MODEL]);
+  await download(MODEL_FILES.map(f => MODEL_DIR + f));
   loadPct = 1;
-  const vision = await FilesetResolver.forVisionTasks(WASM);
-  const opts = delegate => ({
-    baseOptions: { modelAssetBuffer: model, delegate },
-    runningMode: "VIDEO", numPoses: 1,
-    minPoseDetectionConfidence: .5, minPosePresenceConfidence: .5, minTrackingConfidence: .5,
-  });
-  // Some phones stall while setting up the GPU path; fall back to CPU instead of waiting.
-  try { landmarker = await withTimeout(PoseLandmarker.createFromOptions(vision, opts("GPU")), 6000); }
-  catch { landmarker = await PoseLandmarker.createFromOptions(vision, opts("CPU")); }
+  try { await tf.setBackend("webgl"); } catch {}
+  await tf.ready();
+  net = await bodyPix.load({ architecture: "MobileNetV1", outputStride: 16, multiplier: 1.0, quantBytes: 2, modelUrl: MODEL_DIR + MODEL_FILES[0] });
 }
 
 async function startCamera() {
@@ -608,7 +889,7 @@ async function startCamera() {
   // play() can stay pending on some phones; don't block startup on it. A tap on the view retries.
   await withTimeout(video.play(), 3000).catch(() => {});
   mirror = camFacing === "user";
-  smooth = null; lastVideoTime = -1;
+  prevFrames = [];
 }
 
 function showError(e) {
@@ -630,9 +911,9 @@ $("goBtn").onclick = async () => {
     if (!window.isSecureContext || !navigator.mediaDevices) throw new Error("insecure");
     await startCamera();
     $("start").hidden = true;
-    running = true; requestAnimationFrame(frame);
+    running = true; requestAnimationFrame(render); segLoop();
     try { await navigator.wakeLock?.request("screen"); } catch {}
-    await modelReady.catch(() => { throw new Error("The body tracker could not load. Check your internet connection and reload."); });
+    await modelReady.catch(() => { throw new Error("The body model could not load. Check your internet connection and reload."); });
   } catch (e) { showError(e); }
 };
 </script>
